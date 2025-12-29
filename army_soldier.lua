@@ -352,6 +352,9 @@ local function createPanel()
         end
     end
     
+    -- Initialize button state based on current followTargetUserId
+    updateFollowButton()
+    
     -- Set the actual callback
     followButton.MouseButton1Click:Connect(function()
         if followTargetUserId then
