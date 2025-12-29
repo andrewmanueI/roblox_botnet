@@ -351,82 +351,84 @@ task.spawn(function()
                         
                         -- Execute commands
                         if string.sub(action, 1, 5) == "bring" then
-                        local coords = string.split(string.sub(action, 7), ",")
-                        if #coords == 3 then
-                            local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
-                            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
-                                local hrp = LocalPlayer.Character.HumanoidRootPart
-                                local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
-                                
-                                -- Unsit if seated
-                                if humanoid and humanoid.SeatPart then
-                                    humanoid.Sit = false
-                                    task.wait(0.1)
+                            local coords = string.split(string.sub(action, 7), ",")
+                            if #coords == 3 then
+                                local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
+                                if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                                    local hrp = LocalPlayer.Character.HumanoidRootPart
+                                    local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+                                    
+                                    -- Unsit if seated
+                                    if humanoid and humanoid.SeatPart then
+                                        humanoid.Sit = false
+                                        task.wait(0.1)
+                                    end
+                                    
+                                    -- Calculate distance for tween speed
+                                    local distance = (hrp.Position - targetPos).Magnitude
+                                    local tweenSpeed = math.max(distance / 50, 1) -- Adjust speed based on distance
+                                    
+                                    -- Tween to position
+                                    TweenService:Create(
+                                        hrp, 
+                                        TweenInfo.new(tweenSpeed, Enum.EasingStyle.Linear), 
+                                        {CFrame = CFrame.new(targetPos + Vector3.new(math.random(-3, 3), 1, math.random(-3, 3)))}
+                                    ):Play()
+                                    
+                                    sendNotify("Moving", "Traveling to Commander...")
                                 end
-                                
-                                -- Calculate distance for tween speed
-                                local distance = (hrp.Position - targetPos).Magnitude
-                                local tweenSpeed = math.max(distance / 50, 1) -- Adjust speed based on distance
-                                
-                                -- Tween to position
-                                TweenService:Create(
-                                    hrp, 
-                                    TweenInfo.new(tweenSpeed, Enum.EasingStyle.Linear), 
-                                    {CFrame = CFrame.new(targetPos + Vector3.new(math.random(-3, 3), 1, math.random(-3, 3)))}
-                                ):Play()
-                                
-                                sendNotify("Moving", "Traveling to Commander...")
                             end
-                        end
-                        
-                    elseif action == "jump" then
-                        if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
-                            LocalPlayer.Character.Humanoid.Jump = true
-                        end
-                        
-                    elseif string.sub(action, 1, 11) == "join_server" then
-                        local args = string.split(string.sub(action, 13), " ")
-                        if #args == 2 then
-                            local targetPlaceId = tonumber(args[1])
-                            local targetJobId = args[2]
                             
-                            if game.JobId == targetJobId then
-                                sendNotify("Status", "Already in Commander's Server")
-                            else
-                                sendNotify("Traveling", "Joining Commander...")
-                                game:GetService("TeleportService"):TeleportToPlaceInstance(targetPlaceId, targetJobId, LocalPlayer)
+                        elseif action == "jump" then
+                            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+                                LocalPlayer.Character.Humanoid.Jump = true
                             end
-                        end
-                        
-                    elseif action == "reset" then
-                        if LocalPlayer.Character then
-                            LocalPlayer.Character:BreakJoints()
-                        end
-                        
-                    elseif string.sub(action, 1, 6) == "follow" then
-                        local userId = tonumber(string.sub(action, 8))
-                        if userId then
-                            startFollowing(userId)
-                            local targetPlayer = Players:GetPlayerByUserId(userId)
-                            if targetPlayer then
-                                sendNotify("Following", targetPlayer.Name)
+                            
+                        elseif string.sub(action, 1, 11) == "join_server" then
+                            local args = string.split(string.sub(action, 13), " ")
+                            if #args == 2 then
+                                local targetPlaceId = tonumber(args[1])
+                                local targetJobId = args[2]
+                                
+                                if game.JobId == targetJobId then
+                                    sendNotify("Status", "Already in Commander's Server")
+                                else
+                                    sendNotify("Traveling", "Joining Commander...")
+                                    game:GetService("TeleportService"):TeleportToPlaceInstance(targetPlaceId, targetJobId, LocalPlayer)
+                                end
                             end
+                            
+                        elseif action == "reset" then
+                            if LocalPlayer.Character then
+                                LocalPlayer.Character:BreakJoints()
+                            end
+                            
+                        elseif string.sub(action, 1, 6) == "follow" then
+                            local userId = tonumber(string.sub(action, 8))
+                            if userId then
+                                startFollowing(userId)
+                                local targetPlayer = Players:GetPlayerByUserId(userId)
+                                if targetPlayer then
+                                    sendNotify("Following", targetPlayer.Name)
+                                end
+                            end
+                            
+                        elseif action == "stop_follow" then
+                            stopFollowing()
+                            sendNotify("Status", "Stopped following")
+                            
+                        elseif action == "reload" then
+                            sendNotify("System", "Reloading Script...")
+                            terminateScript()
+                            task.spawn(function()
+                                -- Add timestamp to bypass GitHub CDN cache
+                                local reloadUrl = RELOAD_URL .. "?t=" .. os.time()
+                                loadstring(game:HttpGet(reloadUrl))()
+                            end)
+                            
+                        elseif action == "rejoin" then
+                            game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
                         end
-                        
-                    elseif action == "stop_follow" then
-                        stopFollowing()
-                        sendNotify("Status", "Stopped following")
-                        
-                    elseif action == "reload" then
-                        sendNotify("System", "Reloading Script...")
-                        terminateScript()
-                        task.spawn(function()
-                            loadstring(game:HttpGet(RELOAD_URL))()
-                        end)
-                        
-                    elseif action == "rejoin" then
-                        game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
-                    end
                 end
             end
             end
