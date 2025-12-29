@@ -205,8 +205,8 @@ local function createPanel()
         
         -- Title
         local title = Instance.new("TextLabel", button)
-        title.Size = UDim2.new(1, -60, 0, 20)
-        title.Position = UDim2.new(0, 50, 0, 10)
+        title.Size = UDim2.new(1, -70, 0, 20)
+        title.Position = UDim2.new(0, 60, 0, 10)
         title.BackgroundTransparency = 1
         title.Text = config.Title
         title.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -216,8 +216,8 @@ local function createPanel()
         
         -- Description
         local desc = Instance.new("TextLabel", button)
-        desc.Size = UDim2.new(1, -60, 0, 16)
-        desc.Position = UDim2.new(0, 50, 0, 28)
+        desc.Size = UDim2.new(1, -70, 0, 16)
+        desc.Position = UDim2.new(0, 60, 0, 28)
         desc.BackgroundTransparency = 1
         desc.Text = config.Description
         desc.TextColor3 = Color3.fromRGB(150, 150, 160)
