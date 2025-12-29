@@ -258,35 +258,20 @@ local function createPanel()
     })
     
     createButton({
-        Title = "Bring to Me",
-        Description = "Teleport soldiers to your position",
-        Icon = "⊕",
-        Color = Color3.fromRGB(120, 255, 150),
-        Callback = function()
-            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
-                local pos = LocalPlayer.Character.HumanoidRootPart.Position
-                local bringCmd = string.format("bring %.2f,%.2f,%.2f", pos.X, pos.Y, pos.Z)
-                sendCommand(bringCmd)
-                sendNotify("Command", "Bringing soldiers to you...")
-            end
-        end
-    })
-    
-    createButton({
         Title = "Goto Mouse",
-        Description = "Click anywhere to teleport soldiers",
-        Icon = "📍",
-        Color = Color3.fromRGB(255, 120, 200),
+        Description = "Soldiers walk to clicked location",
+        Icon = "🚶",
+        Color = Color3.fromRGB(100, 200, 255),
         Callback = function()
-            sendNotify("Goto Mode", "Click where you want soldiers to go")
+            sendNotify("Goto Mode", "Click where you want soldiers to walk")
             
             local clickConnection
             clickConnection = Mouse.Button1Down:Connect(function()
                 if Mouse.Hit then
                     local targetPos = Mouse.Hit.Position
-                    local gotoCmd = string.format("bring %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
+                    local gotoCmd = string.format("goto %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
                     sendCommand(gotoCmd)
-                    sendNotify("Goto", "Sending soldiers to location")
+                    sendNotify("Goto", "Soldiers walking to location")
                     clickConnection:Disconnect()
                 end
             end)
@@ -296,6 +281,35 @@ local function createPanel()
                 if clickConnection then
                     clickConnection:Disconnect()
                     sendNotify("Goto Mode", "Cancelled")
+                end
+            end)
+        end
+    })
+    
+    createButton({
+        Title = "Force Goto",
+        Description = "Teleport soldiers to clicked location",
+        Icon = "⚡",
+        Color = Color3.fromRGB(255, 120, 200),
+        Callback = function()
+            sendNotify("Force Goto", "Click where to teleport soldiers")
+            
+            local clickConnection
+            clickConnection = Mouse.Button1Down:Connect(function()
+                if Mouse.Hit then
+                    local targetPos = Mouse.Hit.Position
+                    local forceGotoCmd = string.format("bring %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
+                    sendCommand(forceGotoCmd)
+                    sendNotify("Force Goto", "Teleporting soldiers")
+                    clickConnection:Disconnect()
+                end
+            end)
+            
+            -- Auto-cancel after 10 seconds
+            task.delay(10, function()
+                if clickConnection then
+                    clickConnection:Disconnect()
+                    sendNotify("Force Goto", "Cancelled")
                 end
             end)
         end
@@ -792,6 +806,27 @@ task.spawn(function()
                                     ):Play()
                                     
                                     sendNotify("Moving", "Traveling to Commander...")
+                                end
+                            end
+                            
+                        elseif string.sub(action, 1, 4) == "goto" then
+                            if not isCommander then
+                                local coords = string.split(string.sub(action, 6), ",")
+                                if #coords == 3 then
+                                    local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
+                                    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+                                        local humanoid = LocalPlayer.Character.Humanoid
+                                        
+                                        -- Unsit if seated
+                                        if humanoid.SeatPart then
+                                            humanoid.Sit = false
+                                            task.wait(0.1)
+                                        end
+                                        
+                                        -- Walk to position
+                                        humanoid:MoveTo(targetPos)
+                                        sendNotify("Walking", "Moving to location...")
+                                    end
                                 end
                             end
                             
