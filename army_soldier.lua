@@ -19,6 +19,25 @@ local panelGui = nil
 local isPanelOpen = false
 local followConnection = nil
 local followTargetUserId = nil
+local isClicking = false
+local followMode = "Normal" -- Normal, Line, Circle
+local VirtualUser = game:GetService("VirtualUser")
+
+local function toggleClicking(state)
+    isClicking = state
+    if isClicking then
+        task.spawn(function()
+            while isClicking do
+                pcall(function()
+                    VirtualUser:Button1Down(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+                    task.wait(0.05)
+                    VirtualUser:Button1Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+                end)
+                task.wait(0.05)
+            end
+        end)
+    end
+end
 
 -- Helper functions must be defined before createPanel
 local function sendNotify(title, text)
@@ -382,7 +401,9 @@ local function createPanel()
                 actualBtn.TextColor3 = subConfig.Color
             end
             
-            actualBtn.MouseButton1Click:Connect(subConfig.Callback)
+            actualBtn.MouseButton1Click:Connect(function()
+                subConfig.Callback(actualBtn)
+            end)
             return actualBtn
         end
         
@@ -495,6 +516,32 @@ local function createPanel()
     
 
     
+    -- Actions Drawer
+    local actionsDrawer = createDrawer({
+        Title = "Actions",
+        Description = "Automated actions",
+        Icon = "⚡",
+        Color = Color3.fromRGB(255, 220, 100),
+        Buttons = {
+            {
+                Text = "Start Clicking",
+                Color = Color3.fromRGB(100, 255, 150),
+                Callback = function()
+                    toggleClicking(true)
+                    sendNotify("Actions", "Autoclicker Started")
+                end
+            },
+            {
+                Text = "Stop Clicking",
+                Color = Color3.fromRGB(255, 100, 100),
+                Callback = function()
+                    toggleClicking(false)
+                    sendNotify("Actions", "Autoclicker Stopped")
+                end
+            }
+        }
+    })
+    
     -- Follow Drawer
     local followDrawer = createDrawer({
         Title = "Follow Actions",
@@ -502,6 +549,21 @@ local function createPanel()
         Icon = "👤",
         Color = Color3.fromRGB(255, 200, 100),
         Buttons = {
+             {
+                Text = "Mode: Normal",
+                Color = Color3.fromRGB(100, 200, 255),
+                Callback = function(btn)
+                    if followMode == "Normal" then
+                        followMode = "Line"
+                    elseif followMode == "Line" then
+                        followMode = "Circle"
+                    else
+                        followMode = "Normal"
+                    end
+                    btn.Text = "Mode: " .. followMode
+                    sendNotify("Follow Mode", "Switched to " .. followMode)
+                end
+            },
             {
                 Text = "Follow Player",
                 Color = Color3.fromRGB(150, 255, 150),
@@ -518,8 +580,38 @@ local function createPanel()
                                 local player = Players:GetPlayerFromCharacter(character)
                                 if player and player ~= LocalPlayer then
                                     local followCmd = string.format("follow %d", player.UserId)
-                                    sendCommand(followCmd)
-                                    sendNotify("Following", player.Name)
+                                    -- Wait, strictly speaking I should update the server to understand modes?
+                                    -- Or does 'follow' command on server handle it?
+                                    -- The user asked for "selector where i can pick what type of following we're going to do".
+                                    -- This implies the soldiers behave differently.
+                                    -- THIS REQUIRES SERVER SIDE (or client side simulation if local).
+                                    -- Since `army_soldier.lua` is client side for the controller, but the soldiers run it too?
+                                    -- Wait, `army_soldier.lua` IS the script running on the soldiers?
+                                    -- If this script runs on soldiers, then I need to update the polling loop to respect `followMode`!
+                                    
+                                    -- Yes, `army_soldier.lua` runs on all bots.
+                                    -- So `followMode` variable is local to EACH bot if they run this GUI?
+                                    -- NO. This GUI is for the COMMANDER.
+                                    -- The bots don't see the GUI. 
+                                    -- So when I send "follow", I should send the MODE too?
+                                    -- "follow <userid> <mode>"?
+                                    -- Or standard "follow <userid>" and the bots default to normal?
+                                    
+                                    -- The user said "selector where I can pick".
+                                    -- If I am the commander, I pick the mode.
+                                    -- I need to broadcast this mode to the soldiers.
+                                    -- The current protocol is `sendCommand(cmd)`.
+                                    -- I should probably change the command to `follow <userid> <mode>`.
+                                    
+                                    -- Start with standard follow for now, but I'll update the command string if needed.
+                                    -- Let's append the mode to the command if the server script supports it?
+                                    -- Or better: update the command handler loop in THIS script (since solders run it too) to parse the mode.
+                                    
+                                    local modeCmd = followMode or "Normal"
+                                    local fullCmd = string.format("follow %d %s", player.UserId, modeCmd)
+                                    sendCommand(fullCmd)
+                                    
+                                    sendNotify("Following", player.Name .. " (" .. modeCmd .. ")")
                                     followTargetUserId = player.UserId
                                     
                                     clearHighlights(highlights)
@@ -643,19 +735,45 @@ local function clearHighlights(highlights)
     end
 end
 
-local function startFollowing(userId)
+local function startFollowing(userId, mode)
     if followConnection then
         followConnection:Disconnect()
     end
     
     followTargetUserId = userId
+    local mode = mode or "Normal"
     
     followConnection = RunService.Heartbeat:Connect(function()
         local targetPlayer = Players:GetPlayerByUserId(userId)
         if targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
             if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
-                local targetPos = targetPlayer.Character.HumanoidRootPart.Position
+                local targetHRP = targetPlayer.Character.HumanoidRootPart
+                local targetPos = targetHRP.Position
+                
+                if mode == "Line" then
+                     -- Form a line behind the leader
+                     -- Use UserId to determine position in line (pseudo-random but consistent)
+                     local index = (LocalPlayer.UserId % 10) + 1
+                     local spacing = 4
+                     local offset = targetHRP.CFrame.LookVector * -1 * (index * spacing + 5)
+                     targetPos = targetPos + offset
+                     
+                elseif mode == "Circle" then
+                    -- Form a circle around the leader
+                    local angle = math.rad((os.time() * 50 + LocalPlayer.UserId) % 360)
+                    local radius = 15
+                    local offset = Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
+                    targetPos = targetPos + offset
+                else
+                    -- Normal: Just randomize slightly to prevent perfect stacking
+                    targetPos = targetPos + Vector3.new(math.random(-2,2), 0, math.random(-2,2))
+                end
+                
                 LocalPlayer.Character.Humanoid:MoveTo(targetPos)
+            end
+        end
+    end)
+end
             end
         end
     end)
@@ -1019,14 +1137,17 @@ task.spawn(function()
                             end
                             
                         elseif string.sub(action, 1, 6) == "follow" then
-                            local userId = tonumber(string.sub(action, 8))
+                            local args = string.split(string.sub(action, 8), " ")
+                            local userId = tonumber(args[1])
+                            local mode = args[2]
                             if userId then
-                                startFollowing(userId)
+                                startFollowing(userId, mode)
                                 local targetPlayer = Players:GetPlayerByUserId(userId)
                                 if targetPlayer then
-                                    sendNotify("Following", targetPlayer.Name)
+                                    sendNotify("Following", targetPlayer.Name .. (mode and " ("..mode..")" or ""))
                                 end
                             end
+
                             
                         elseif action == "stop_follow" then
                             stopFollowing()
