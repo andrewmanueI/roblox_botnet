@@ -121,13 +121,6 @@ local function createWheel()
     screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     screenGui.ResetOnSpawn = false
     
-    -- Background blur/dim
-    local dimFrame = Instance.new("Frame", screenGui)
-    dimFrame.Size = UDim2.new(1, 0, 1, 0)
-    dimFrame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-    dimFrame.BackgroundTransparency = 0.5
-    dimFrame.BorderSizePixel = 0
-    
     -- Main wheel container
     local wheelFrame = Instance.new("Frame", screenGui)
     wheelFrame.Size = UDim2.new(0, 400, 0, 400)
