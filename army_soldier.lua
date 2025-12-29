@@ -701,12 +701,9 @@ local function createPanel()
         }
     })
     
+    -- Initial State: Hidden
+    panel.Position = UDim2.new(1, 0, 0.5, -240)
     screenGui.Parent = LocalPlayer.PlayerGui
-    
-    -- Slide in animation
-    TweenService:Create(panel, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
-        Position = UDim2.new(1, -340, 0.5, -240)
-    }):Play()
     
     return screenGui
 end
@@ -1020,23 +1017,34 @@ table.insert(connections, UserInputService.InputBegan:Connect(function(input, pr
     if processed then return end
     
     if input.KeyCode == Enum.KeyCode.G then
-        if not isPanelOpen then
-            isPanelOpen = true
-            isCommander = true
+        isCommander = true
+        
+        if not panelGui then
             panelGui = createPanel()
+        end
+        
+        local panel = panelGui:FindFirstChild("MainPanel")
+        if not panel then return end
+
+        if not isPanelOpen then
+            -- Open
+            isPanelOpen = true
+            panelGui.Enabled = true
+            TweenService:Create(panel, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+                Position = UDim2.new(1, -340, 0.5, -240)
+            }):Play()
         else
+            -- Close
             isPanelOpen = false
-            if panelGui then
-                local panel = panelGui:FindFirstChild("MainPanel")
-                if panel then
-                    TweenService:Create(panel, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {
-                        Position = UDim2.new(1, 0, 0.5, -240)
-                    }):Play()
-                    task.wait(0.3)
+            TweenService:Create(panel, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {
+                Position = UDim2.new(1, 0, 0.5, -240)
+            }):Play()
+            
+            task.delay(0.3, function()
+                if not isPanelOpen and panelGui then
+                    panelGui.Enabled = false
                 end
-                panelGui:Destroy()
-                panelGui = nil
-            end
+            end)
         end
     elseif input.KeyCode == Enum.KeyCode.F3 then
         terminateScript()
