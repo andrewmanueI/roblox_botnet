@@ -1,6 +1,5 @@
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
-local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
 
@@ -15,21 +14,11 @@ local isRunning = true
 local isCommander = false
 local connections = {}
 
--- Command definitions
-local COMMANDS = {
-    {Name = "Jump", Icon = "JUMP", Action = "jump"},
-    {Name = "Join Cmdr", Icon = "JOIN", Action = "join_commander"},
-    {Name = "Bring", Icon = "BRING", Action = "bring"},
-    {Name = "Follow", Icon = "FOLLOW", Action = "follow"},
-    {Name = "Reset", Icon = "RESET", Action = "reset"},
-    {Name = "Reload", Icon = "RELOAD", Action = "reload"},
-    {Name = "Rejoin", Icon = "REJOIN", Action = "rejoin"}
-}
-
-local wheelGui = nil
-local isWheelOpen = false
 local followConnection = nil
 local followTargetUserId = nil
+
+-- Load WindUI
+local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"))()
 
 -- Follow helper functions
 local function highlightPlayers()
@@ -94,7 +83,6 @@ local function terminateScript()
     for _, conn in ipairs(connections) do
         if conn then conn:Disconnect() end
     end
-    if wheelGui then wheelGui:Destroy() end
     stopFollowing()
 end
 
@@ -114,204 +102,180 @@ local function sendCommand(cmd)
     end)
 end
 
--- Create GTA 5 Style Wheel
-local function createWheel()
-    local screenGui = Instance.new("ScreenGui")
-    screenGui.Name = "ArmyWheel"
-    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    screenGui.ResetOnSpawn = false
+-- Create WindUI Window
+local Window = WindUI:CreateWindow({
+    Title = "Army Commander",
+    Icon = "users",
+    Folder = "ArmyScript",
+    Size = UDim2.fromOffset(550, 450),
     
-    -- Main wheel container
-    local wheelFrame = Instance.new("Frame", screenGui)
-    wheelFrame.Size = UDim2.new(0, 400, 0, 400)
-    wheelFrame.Position = UDim2.new(0.5, -200, 0.5, -200)
-    wheelFrame.BackgroundTransparency = 1
+    OpenButton = {
+        Title = "Army Control",
+        Enabled = true,
+        Draggable = true,
+    },
     
-    -- Center circle (info display)
-    local centerCircle = Instance.new("Frame", wheelFrame)
-    centerCircle.Size = UDim2.new(0, 180, 0, 180)
-    centerCircle.Position = UDim2.new(0.5, -90, 0.5, -90)
-    centerCircle.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-    centerCircle.BorderSizePixel = 0
-    
-    local centerCorner = Instance.new("UICorner", centerCircle)
-    centerCorner.CornerRadius = UDim.new(1, 0)
-    
-    local centerStroke = Instance.new("UIStroke", centerCircle)
-    centerStroke.Color = Color3.fromRGB(200, 200, 200)
-    centerStroke.Thickness = 2
-    
-    local centerLabel = Instance.new("TextLabel", centerCircle)
-    centerLabel.Size = UDim2.new(1, 0, 1, 0)
-    centerLabel.BackgroundTransparency = 1
-    centerLabel.Text = "Select Command"
-    centerLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-    centerLabel.TextSize = 18
-    centerLabel.Font = Enum.Font.GothamBold
-    centerLabel.TextWrapped = true
-    
-    -- Create segments
-    local numSegments = #COMMANDS
-    local anglePerSegment = 360 / numSegments
-    
-    for i, cmd in ipairs(COMMANDS) do
-        local angle = math.rad((i - 1) * anglePerSegment - 90) -- Start from top
-        local radius = 150
-        
-        -- Segment button
-        local segment = Instance.new("TextButton", wheelFrame)
-        segment.Size = UDim2.new(0, 80, 0, 80)
-        segment.Position = UDim2.new(0.5, math.cos(angle) * radius - 40, 0.5, math.sin(angle) * radius - 40)
-        segment.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
-        segment.BorderSizePixel = 0
-        segment.Text = ""
-        segment.AutoButtonColor = false
-        
-        local segCorner = Instance.new("UICorner", segment)
-        segCorner.CornerRadius = UDim.new(0.2, 0)
-        
-        local segStroke = Instance.new("UIStroke", segment)
-        segStroke.Color = Color3.fromRGB(150, 150, 150)
-        segStroke.Thickness = 2
-        
-        -- Icon/Label
-        local label = Instance.new("TextLabel", segment)
-        label.Size = UDim2.new(1, 0, 0.6, 0)
-        label.Position = UDim2.new(0, 0, 0, 0)
-        label.BackgroundTransparency = 1
-        label.Text = cmd.Icon
-        label.TextSize = 32
-        label.TextColor3 = Color3.fromRGB(255, 255, 255)
-        
-        local nameLabel = Instance.new("TextLabel", segment)
-        nameLabel.Size = UDim2.new(1, 0, 0.4, 0)
-        nameLabel.Position = UDim2.new(0, 0, 0.6, 0)
-        nameLabel.BackgroundTransparency = 1
-        -- Dynamic text for Follow button
-        if cmd.Action == "follow" then
-            nameLabel.Text = followTargetUserId and "Stop Follow" or "Follow"
+    Topbar = {
+        Height = 44,
+        ButtonsType = "Default",
+    },
+})
+
+-- Mark as commander when window is opened
+isCommander = true
+
+-- Commands Tab
+local CommandsTab = Window:Tab({
+    Title = "Commands",
+    Icon = "command",
+})
+
+-- Movement Section
+local MovementSection = CommandsTab:Section({
+    Title = "Movement",
+})
+
+MovementSection:Button({
+    Title = "Jump",
+    Icon = "arrow-up",
+    Callback = function()
+        sendCommand("jump")
+        sendNotify("Command", "Jump executed")
+    end
+})
+
+MovementSection:Button({
+    Title = "Bring to Me",
+    Icon = "move",
+    Callback = function()
+        if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+            local pos = LocalPlayer.Character.HumanoidRootPart.Position
+            local bringCmd = string.format("bring %.2f,%.2f,%.2f", pos.X, pos.Y, pos.Z)
+            sendCommand(bringCmd)
+            sendNotify("Command", "Bringing soldiers to you...")
+        end
+    end
+})
+
+-- Follow Section
+local FollowSection = CommandsTab:Section({
+    Title = "Follow",
+})
+
+FollowSection:Button({
+    Title = followTargetUserId and "Stop Following" or "Follow Player",
+    Icon = "user-plus",
+    Callback = function()
+        if followTargetUserId then
+            sendCommand("stop_follow")
+            stopFollowing()
+            sendNotify("Command", "Stopped following")
         else
-            nameLabel.Text = cmd.Name
-        end
-        nameLabel.TextSize = 12
-        nameLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
-        nameLabel.Font = Enum.Font.Gotham
-        
-        -- Hover effect
-        segment.MouseEnter:Connect(function()
-            segment.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
-            centerLabel.Text = cmd.Name
-            TweenService:Create(segment, TweenInfo.new(0.1), {Size = UDim2.new(0, 90, 0, 90)}):Play()
-        end)
-        
-        segment.MouseLeave:Connect(function()
-            segment.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
-            TweenService:Create(segment, TweenInfo.new(0.1), {Size = UDim2.new(0, 80, 0, 80)}):Play()
-        end)
-        
-        -- Click handler
-        segment.MouseButton1Click:Connect(function()
-            if cmd.Action == "bring" then
-                -- Send commander's position
-                if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
-                    local pos = LocalPlayer.Character.HumanoidRootPart.Position
-                    local bringCmd = string.format("bring %.2f,%.2f,%.2f", pos.X, pos.Y, pos.Z)
-                    sendCommand(bringCmd)
-                    sendNotify("Command", "Bringing soldiers to you...")
-                end
-                
-            elseif cmd.Action == "follow" then
-                -- Toggle follow mode
-                if followTargetUserId then
-                    -- Stop following
-                    sendCommand("stop_follow")
-                    stopFollowing()
-                    sendNotify("Command", "Stopped following")
-                else
-                    -- Enter targeting mode
-                    sendNotify("Follow Mode", "Click on a player to follow")
-                    local highlights = highlightPlayers()
-                    
-                    -- Wait for click on a player
-                    local clickConnection
-                    clickConnection = Mouse.Button1Down:Connect(function()
-                        local target = Mouse.Target
-                        if target then
-                            local character = target:FindFirstAncestorOfClass("Model")
-                            if character then
-                                local player = Players:GetPlayerFromCharacter(character)
-                                if player and player ~= LocalPlayer then
-                                    -- Found valid target
-                                    local followCmd = string.format("follow %d", player.UserId)
-                                    sendCommand(followCmd)
-                                    sendNotify("Following", player.Name)
-                                    
-                                    clearHighlights(highlights)
-                                    clickConnection:Disconnect()
-                                    
-                                    -- Close wheel on success
-                                    isWheelOpen = false
-                                    if wheelGui then wheelGui:Destroy() end
-                                end
-                            end
-                        end
-                    end)
-                    
-                    -- Auto-cancel after 10 seconds
-                    task.delay(10, function()
-                        if clickConnection then
-                            clickConnection:Disconnect()
-                            clearHighlights(highlights)
-                            sendNotify("Follow Mode", "Cancelled")
-                        end
-                    end)
-                end
-                
-            elseif cmd.Action == "join_commander" then
-                local joinCmd = string.format("join_server %s %s", tostring(game.PlaceId), game.JobId)
-                sendCommand(joinCmd)
-                sendNotify("Command", "Broadcasting Server Info...")
-            else
-                sendCommand(cmd.Action)
-                sendNotify("Command", cmd.Name .. " executed")
-            end
+            sendNotify("Follow Mode", "Click on a player to follow")
+            local highlights = highlightPlayers()
             
-            -- Close wheel (unless in follow targeting mode)
-            if cmd.Action ~= "follow" or followTargetUserId then
-                isWheelOpen = false
-                screenGui:Destroy()
-            end
-        end)
-    end
-    
-    screenGui.Parent = LocalPlayer.PlayerGui
-    return screenGui
-end
-
--- Wheel toggle
-table.insert(connections, UserInputService.InputBegan:Connect(function(input, processed)
-    if processed then return end
-    
-    if input.KeyCode == Enum.KeyCode.G then
-        if not isWheelOpen then
-            isWheelOpen = true
-            isCommander = true -- User becomes commander when opening wheel
-            wheelGui = createWheel()
-        end
-    elseif input.KeyCode == Enum.KeyCode.F3 then
-        terminateScript()
-    end
-end))
-
-table.insert(connections, UserInputService.InputEnded:Connect(function(input)
-    if input.KeyCode == Enum.KeyCode.G then
-        if isWheelOpen and wheelGui then
-            isWheelOpen = false
-            wheelGui:Destroy()
-            wheelGui = nil
+            local clickConnection
+            clickConnection = Mouse.Button1Down:Connect(function()
+                local target = Mouse.Target
+                if target then
+                    local character = target:FindFirstAncestorOfClass("Model")
+                    if character then
+                        local player = Players:GetPlayerFromCharacter(character)
+                        if player and player ~= LocalPlayer then
+                            local followCmd = string.format("follow %d", player.UserId)
+                            sendCommand(followCmd)
+                            sendNotify("Following", player.Name)
+                            
+                            clearHighlights(highlights)
+                            clickConnection:Disconnect()
+                        end
+                    end
+                end
+            end)
+            
+            task.delay(10, function()
+                if clickConnection then
+                    clickConnection:Disconnect()
+                    clearHighlights(highlights)
+                    sendNotify("Follow Mode", "Cancelled")
+                end
+            end)
         end
     end
-end))
+})
+
+-- Server Section
+local ServerSection = CommandsTab:Section({
+    Title = "Server",
+})
+
+ServerSection:Button({
+    Title = "Join My Server",
+    Icon = "server",
+    Callback = function()
+        local joinCmd = string.format("join_server %s %s", tostring(game.PlaceId), game.JobId)
+        sendCommand(joinCmd)
+        sendNotify("Command", "Broadcasting Server Info...")
+    end
+})
+
+ServerSection:Button({
+    Title = "Rejoin",
+    Icon = "refresh-cw",
+    Callback = function()
+        sendCommand("rejoin")
+        sendNotify("Command", "Rejoin executed")
+    end
+})
+
+-- System Section
+local SystemSection = CommandsTab:Section({
+    Title = "System",
+})
+
+SystemSection:Button({
+    Title = "Reset Character",
+    Icon = "rotate-ccw",
+    Callback = function()
+        sendCommand("reset")
+        sendNotify("Command", "Reset executed")
+    end
+})
+
+SystemSection:Button({
+    Title = "Reload Script",
+    Icon = "download",
+    Callback = function()
+        sendCommand("reload")
+        sendNotify("System", "Reloading all soldiers...")
+    end
+})
+
+-- Info Tab
+local InfoTab = Window:Tab({
+    Title = "Info",
+    Icon = "info",
+})
+
+InfoTab:Section({
+    Title = "Controls",
+}):Paragraph({
+    Title = "How to Use",
+    Content = [[
+• Press G to toggle the UI
+• Click buttons to send commands
+• All soldiers will execute commands
+• You (commander) are immune to commands
+• Reload works for everyone
+    ]]
+})
+
+InfoTab:Section({
+    Title = "Status",
+}):Paragraph({
+    Title = "Server",
+    Content = "Connected to: " .. SERVER_URL
+})
 
 -- Polling loop
 task.spawn(function()
@@ -344,17 +308,14 @@ task.spawn(function()
                                     local hrp = LocalPlayer.Character.HumanoidRootPart
                                     local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
                                     
-                                    -- Unsit if seated
                                     if humanoid and humanoid.SeatPart then
                                         humanoid.Sit = false
                                         task.wait(0.1)
                                     end
                                     
-                                    -- Calculate distance for tween speed
                                     local distance = (hrp.Position - targetPos).Magnitude
-                                    local tweenSpeed = math.max(distance / 50, 1) -- Adjust speed based on distance
+                                    local tweenSpeed = math.max(distance / 50, 1)
                                     
-                                    -- Tween to position
                                     TweenService:Create(
                                         hrp, 
                                         TweenInfo.new(tweenSpeed, Enum.EasingStyle.Linear), 
@@ -415,11 +376,9 @@ task.spawn(function()
                         end
                         
                     elseif action == "reload" then
-                        -- Reload works for everyone (commander and soldiers)
                         sendNotify("System", "Reloading Script...")
                         terminateScript()
                         task.spawn(function()
-                            -- Add timestamp to bypass GitHub CDN cache
                             local reloadUrl = RELOAD_URL .. "?t=" .. os.time()
                             loadstring(game:HttpGet(reloadUrl))()
                         end)
@@ -435,5 +394,5 @@ task.spawn(function()
     end
 end)
 
-sendNotify("Army Script", "Hold G for Command Wheel | F3 to Exit")
-print("Army Soldier loaded - Hold G for wheel")
+sendNotify("Army Script", "Press G to open UI")
+print("Army Soldier loaded - Press G for UI")
