@@ -260,75 +260,6 @@ local function createPanel()
         return button
     end
     
-    -- Create command buttons
-    -- Movement Drawer
-    local movementDrawer = createDrawer({
-        Title = "Movement",
-        Description = "Control army movement",
-        Icon = "🏃",
-        Color = Color3.fromRGB(100, 200, 255),
-        Buttons = {
-            {
-                Text = "Jump",
-                Color = Color3.fromRGB(100, 220, 255),
-                Callback = function()
-                    sendCommand("jump")
-                    sendNotify("Command", "Jump executed")
-                end
-            },
-            {
-                Text = "Goto Mouse (Walk)",
-                Color = Color3.fromRGB(100, 200, 255),
-                Callback = function()
-                    sendNotify("Goto Mode", "Click where you want soldiers to walk")
-                    
-                    local clickConnection
-                    clickConnection = Mouse.Button1Down:Connect(function()
-                        if Mouse.Hit then
-                            local targetPos = Mouse.Hit.Position
-                            local gotoCmd = string.format("goto %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
-                            sendCommand(gotoCmd)
-                            sendNotify("Goto", "Soldiers walking to location")
-                            clickConnection:Disconnect()
-                        end
-                    end)
-                    
-                    task.delay(10, function()
-                        if clickConnection then
-                            clickConnection:Disconnect()
-                            sendNotify("Goto Mode", "Cancelled")
-                        end
-                    end)
-                end
-            },
-            {
-                Text = "Force Goto (Teleport)",
-                Color = Color3.fromRGB(255, 120, 200),
-                Callback = function()
-                    sendNotify("Force Goto", "Click where to teleport soldiers")
-                    
-                    local clickConnection
-                    clickConnection = Mouse.Button1Down:Connect(function()
-                        if Mouse.Hit then
-                            local targetPos = Mouse.Hit.Position
-                            local forceGotoCmd = string.format("bring %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
-                            sendCommand(forceGotoCmd)
-                            sendNotify("Force Goto", "Teleporting soldiers")
-                            clickConnection:Disconnect()
-                        end
-                    end)
-                    
-                    task.delay(10, function()
-                        if clickConnection then
-                            clickConnection:Disconnect()
-                            sendNotify("Force Goto", "Cancelled")
-                        end
-                    end)
-                end
-            }
-        }
-    })
-    
     -- Helper function to create drawer with sub-buttons
     local function createDrawer(config)
         -- Container for the whole drawer (The unified "Card")
@@ -492,6 +423,77 @@ local function createPanel()
             end
         }
     end
+    
+    -- Create command buttons
+    -- Movement Drawer
+    local movementDrawer = createDrawer({
+        Title = "Movement",
+        Description = "Control army movement",
+        Icon = "🏃",
+        Color = Color3.fromRGB(100, 200, 255),
+        Buttons = {
+            {
+                Text = "Jump",
+                Color = Color3.fromRGB(100, 220, 255),
+                Callback = function()
+                    sendCommand("jump")
+                    sendNotify("Command", "Jump executed")
+                end
+            },
+            {
+                Text = "Goto Mouse (Walk)",
+                Color = Color3.fromRGB(100, 200, 255),
+                Callback = function()
+                    sendNotify("Goto Mode", "Click where you want soldiers to walk")
+                    
+                    local clickConnection
+                    clickConnection = Mouse.Button1Down:Connect(function()
+                        if Mouse.Hit then
+                            local targetPos = Mouse.Hit.Position
+                            local gotoCmd = string.format("goto %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
+                            sendCommand(gotoCmd)
+                            sendNotify("Goto", "Soldiers walking to location")
+                            clickConnection:Disconnect()
+                        end
+                    end)
+                    
+                    task.delay(10, function()
+                        if clickConnection then
+                            clickConnection:Disconnect()
+                            sendNotify("Goto Mode", "Cancelled")
+                        end
+                    end)
+                end
+            },
+            {
+                Text = "Force Goto (Teleport)",
+                Color = Color3.fromRGB(255, 120, 200),
+                Callback = function()
+                    sendNotify("Force Goto", "Click where to teleport soldiers")
+                    
+                    local clickConnection
+                    clickConnection = Mouse.Button1Down:Connect(function()
+                        if Mouse.Hit then
+                            local targetPos = Mouse.Hit.Position
+                            local forceGotoCmd = string.format("bring %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
+                            sendCommand(forceGotoCmd)
+                            sendNotify("Force Goto", "Teleporting soldiers")
+                            clickConnection:Disconnect()
+                        end
+                    end)
+                    
+                    task.delay(10, function()
+                        if clickConnection then
+                            clickConnection:Disconnect()
+                            sendNotify("Force Goto", "Cancelled")
+                        end
+                    end)
+                end
+            }
+        }
+    })
+    
+
     
     -- Follow Drawer
     local followDrawer = createDrawer({
