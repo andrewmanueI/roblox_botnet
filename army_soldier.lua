@@ -273,6 +273,35 @@ local function createPanel()
     })
     
     createButton({
+        Title = "Goto Mouse",
+        Description = "Click anywhere to teleport soldiers",
+        Icon = "📍",
+        Color = Color3.fromRGB(255, 120, 200),
+        Callback = function()
+            sendNotify("Goto Mode", "Click where you want soldiers to go")
+            
+            local clickConnection
+            clickConnection = Mouse.Button1Down:Connect(function()
+                if Mouse.Hit then
+                    local targetPos = Mouse.Hit.Position
+                    local gotoCmd = string.format("bring %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
+                    sendCommand(gotoCmd)
+                    sendNotify("Goto", "Sending soldiers to location")
+                    clickConnection:Disconnect()
+                end
+            end)
+            
+            -- Auto-cancel after 10 seconds
+            task.delay(10, function()
+                if clickConnection then
+                    clickConnection:Disconnect()
+                    sendNotify("Goto Mode", "Cancelled")
+                end
+            end)
+        end
+    })
+    
+    createButton({
         Title = followTargetUserId and "Stop Following" or "Follow Player",
         Description = "Click a player to follow them",
         Icon = "👤",
