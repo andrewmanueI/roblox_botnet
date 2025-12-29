@@ -12,6 +12,7 @@ local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
 
 local SERVER_URL = "http://157.20.32.201:5555"
+local RELOAD_URL = "https://raw.githubusercontent.com/andrewmanueI/roblox_botnet/master/army_soldier.lua"
 local POLL_RATE = 0.5
 local lastCommandId = 0
 local isRunning = true
@@ -24,6 +25,7 @@ local COMMANDS = {
     {Name = "Bring", Icon = "BRING", Action = "bring"},
     {Name = "Follow", Icon = "FOLLOW", Action = "follow"},
     {Name = "Reset", Icon = "RESET", Action = "reset"},
+    {Name = "Reload", Icon = "RELOAD", Action = "reload"},
     {Name = "Rejoin", Icon = "REJOIN", Action = "rejoin"}
 }
 
@@ -87,6 +89,16 @@ local function sendNotify(title, text)
         Text = text,
         Duration = 3
     })
+end
+
+local function terminateScript()
+    isRunning = false
+    sendNotify("Army Script", "Script Terminated")
+    for _, conn in ipairs(connections) do
+        if conn then conn:Disconnect() end
+    end
+    if wheelGui then wheelGui:Destroy() end
+    stopFollowing()
 end
 
 local function sendCommand(cmd)
@@ -299,12 +311,7 @@ table.insert(connections, UserInputService.InputBegan:Connect(function(input, pr
             wheelGui = createWheel()
         end
     elseif input.KeyCode == Enum.KeyCode.F3 then
-        isRunning = false
-        sendNotify("Army Script", "Script Terminated")
-        for _, conn in ipairs(connections) do
-            if conn then conn:Disconnect() end
-        end
-        if wheelGui then wheelGui:Destroy() end
+        terminateScript()
     end
 end))
 
@@ -406,6 +413,13 @@ task.spawn(function()
                     elseif action == "stop_follow" then
                         stopFollowing()
                         sendNotify("Status", "Stopped following")
+                        
+                    elseif action == "reload" then
+                        sendNotify("System", "Reloading Script...")
+                        terminateScript()
+                        task.spawn(function()
+                            loadstring(game:HttpGet(RELOAD_URL))()
+                        end)
                         
                     elseif action == "rejoin" then
                         game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
