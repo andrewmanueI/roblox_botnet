@@ -19,14 +19,11 @@ local connections = {}
 
 -- Command definitions
 local COMMANDS = {
-    {Name = "Move", Icon = "GO", Action = "move"},
-    {Name = "Jump", Icon = "JMP", Action = "jump"},
-    {Name = "Join Cmdr", Icon = "JIN", Action = "join_commander"},
-    {Name = "Sit", Icon = "SIT", Action = "sit"},
-    {Name = "Wave", Icon = "WAV", Action = "wave"},
-    {Name = "Follow", Icon = "FLW", Action = "follow"},
-    {Name = "Stop", Icon = "STP", Action = "stop"},
-    {Name = "Rejoin", Icon = "RJN", Action = "rejoin"}
+    {Name = "Jump", Icon = "JUMP", Action = "jump"},
+    {Name = "Join Cmdr", Icon = "JOIN", Action = "join_commander"},
+    {Name = "Bring", Icon = "BRING", Action = "bring"},
+    {Name = "Reset", Icon = "RESET", Action = "reset"},
+    {Name = "Rejoin", Icon = "REJOIN", Action = "rejoin"}
 }
 
 local wheelGui = nil
@@ -155,12 +152,14 @@ local function createWheel()
         
         -- Click handler
         segment.MouseButton1Click:Connect(function()
-            if cmd.Action == "move" then
-                -- Special case: use mouse position
-                local pos = Mouse.Hit.Position
-                local moveCmd = string.format("walk %.2f,%.2f,%.2f", pos.X, pos.Y, pos.Z)
-                sendCommand(moveCmd)
-                sendNotify("Command", "Move order sent")
+            if cmd.Action == "bring" then
+                -- Send commander's position
+                if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                    local pos = LocalPlayer.Character.HumanoidRootPart.Position
+                    local bringCmd = string.format("bring %.2f,%.2f,%.2f", pos.X, pos.Y, pos.Z)
+                    sendCommand(bringCmd)
+                    sendNotify("Command", "Bringing soldiers to you...")
+                end
             elseif cmd.Action == "join_commander" then
                 local joinCmd = string.format("join_server %s %s", tostring(game.PlaceId), game.JobId)
                 sendCommand(joinCmd)
@@ -244,18 +243,41 @@ task.spawn(function()
                             end
                         end)
 
-                    elseif string.sub(action, 1, 4) == "walk" then
-                        local coords = string.split(string.sub(action, 6), ",")
+
+                    elseif string.sub(action, 1, 5) == "bring" then
+                        local coords = string.split(string.sub(action, 7), ",")
                         if #coords == 3 then
                             local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
-                            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
-                                LocalPlayer.Character.Humanoid:MoveTo(targetPos)
+                            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                                local hrp = LocalPlayer.Character.HumanoidRootPart
+                                local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+                                
+                                -- Unsit if seated
+                                if humanoid and humanoid.SeatPart then
+                                    humanoid.Sit = false
+                                    task.wait(0.1)
+                                end
+                                
+                                -- Calculate distance for tween speed
+                                local distance = (hrp.Position - targetPos).Magnitude
+                                local tweenSpeed = math.max(distance / 50, 1) -- Adjust speed based on distance
+                                
+                                -- Tween to position
+                                TweenService:Create(
+                                    hrp, 
+                                    TweenInfo.new(tweenSpeed, Enum.EasingStyle.Linear), 
+                                    {CFrame = CFrame.new(targetPos + Vector3.new(math.random(-3, 3), 1, math.random(-3, 3)))}
+                                ):Play()
+                                
+                                sendNotify("Moving", "Traveling to Commander...")
                             end
                         end
+                        
                     elseif action == "jump" then
                         if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
                             LocalPlayer.Character.Humanoid.Jump = true
                         end
+                        
                     elseif string.sub(action, 1, 11) == "join_server" then
                         local args = string.split(string.sub(action, 13), " ")
                         if #args == 2 then
@@ -269,13 +291,12 @@ task.spawn(function()
                                 game:GetService("TeleportService"):TeleportToPlaceInstance(targetPlaceId, targetJobId, LocalPlayer)
                             end
                         end
-                    elseif action == "sit" then
-                        if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
-                            LocalPlayer.Character.Humanoid.Sit = true
+                        
+                    elseif action == "reset" then
+                        if LocalPlayer.Character then
+                            LocalPlayer.Character:BreakJoints()
                         end
-                    elseif action == "wave" then
-                        game:GetService("ReplicatedStorage"):WaitForChild("DefaultChatSystemChatEvents")
-                            :WaitForChild("SayMessageRequest"):FireServer("/e wave", "All")
+                        
                     elseif action == "rejoin" then
                         game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
                     end
