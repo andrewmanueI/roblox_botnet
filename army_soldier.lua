@@ -774,10 +774,7 @@ local function startFollowing(userId, mode)
         end
     end)
 end
-            end
-        end
-    end)
-end
+
 
 local function stopFollowing()
     if followConnection then
