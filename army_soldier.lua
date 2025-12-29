@@ -4,6 +4,10 @@ local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
 
+-- Forward declarations
+local highlightPlayers, clearHighlights, startFollowing, stopFollowing
+local getVisibleButtons
+
 local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
 
@@ -358,6 +362,7 @@ local function createPanel()
         
         -- Content Container (Sub-buttons)
         local contentContainer = Instance.new("Frame", drawerContainer)
+        contentContainer.Name = "Content"
         contentContainer.Size = UDim2.new(1, 0, 0, 0)
         contentContainer.Position = UDim2.new(0, 0, 0, 50)
         contentContainer.BackgroundTransparency = 1
@@ -445,6 +450,22 @@ local function createPanel()
         }
     end
     
+    local function getVisibleButtons()
+        local buttons = {}
+        local function recurse(obj)
+            if obj:IsA("GuiButton") and obj.Visible then
+                if obj.AbsoluteSize.X > 0 and obj.AbsoluteSize.Y > 0 then
+                    table.insert(buttons, obj)
+                end
+            end
+            for _, child in ipairs(obj:GetChildren()) do
+                recurse(child)
+            end
+        end
+        recurse(LocalPlayer.PlayerGui)
+        return buttons
+    end
+
     -- Create command buttons
     -- Movement Drawer
     local movementDrawer = createDrawer({
@@ -670,6 +691,59 @@ local function createPanel()
                 Callback = function()
                     sendCommand("rejoin")
                     sendNotify("Command", "Rejoin executed")
+                end
+            }
+        }
+    })
+    
+    -- Info Drawer (Mobile Inspector)
+    local infoDrawer -- Defined early for closure access
+    infoDrawer = createDrawer({
+        Title = "Information",
+        Description = "Inspect UI Elements",
+        Icon = "ℹ️",
+        Color = Color3.fromRGB(100, 200, 255),
+        Buttons = {
+            {
+                Text = "Scan Mobile Buttons",
+                Color = Color3.fromRGB(100, 255, 200),
+                Callback = function()
+                    local container = infoDrawer:FindFirstChild("Content")
+                    if not container then return end
+                    
+                    -- Clear previous results
+                    for _, child in ipairs(container:GetChildren()) do
+                        if child.Name == "InfoResult" then
+                            child:Destroy()
+                        end
+                    end
+                    
+                    local found = getVisibleButtons()
+                    sendNotify("Info", "Found " .. #found .. " buttons")
+                    
+                    for _, btn in ipairs(found) do
+                        local infoFrame = Instance.new("Frame", container)
+                        infoFrame.Name = "InfoResult"
+                        infoFrame.Size = UDim2.new(1, 0, 0, 50)
+                        infoFrame.BackgroundTransparency = 0.9
+                        infoFrame.BackgroundColor3 = Color3.fromRGB(0,0,0)
+                        infoFrame.BorderSizePixel = 0
+                        
+                        local lbl = Instance.new("TextLabel", infoFrame)
+                        lbl.Size = UDim2.new(1, -10, 1, 0)
+                        lbl.Position = UDim2.new(0, 5, 0, 0)
+                        lbl.BackgroundTransparency = 1
+                        lbl.TextColor3 = Color3.fromRGB(200,200,200)
+                        lbl.TextSize = 10
+                        lbl.Font = Enum.Font.Code
+                        lbl.TextXAlignment = Enum.TextXAlignment.Left
+                        lbl.Text = string.format("Name: %s\nPos: %d, %d | Size: %d x %d\nText: %s", 
+                            btn.Name, 
+                            btn.AbsolutePosition.X, btn.AbsolutePosition.Y,
+                            btn.AbsoluteSize.X, btn.AbsoluteSize.Y,
+                            (btn:IsA("TextButton") and btn.Text:sub(1,15) or "N/A")
+                        )
+                    end
                 end
             }
         }
@@ -1189,97 +1263,5 @@ task.spawn(function()
     end
 end)
 
--- Mobile Support: Persistent Toggle Button
-local function createMobileToggle()
-    local screenGui = Instance.new("ScreenGui")
-    screenGui.Name = "ArmyMobileToggle"
-    screenGui.ResetOnSpawn = false
-    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    
-    local toggleBtn = Instance.new("TextButton", screenGui)
-    toggleBtn.Name = "Toggle"
-    toggleBtn.Size = UDim2.new(0, 50, 0, 50)
-    toggleBtn.Position = UDim2.new(1, -70, 0.5, -25) -- Middle right
-    toggleBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 50)
-    toggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    toggleBtn.Text = "🛡️"
-    toggleBtn.TextSize = 24
-    toggleBtn.Font = Enum.Font.GothamBold
-    toggleBtn.AutoButtonColor = true
-    
-    local corner = Instance.new("UICorner", toggleBtn)
-    corner.CornerRadius = UDim.new(0, 12)
-    
-    local stroke = Instance.new("UIStroke", toggleBtn)
-    stroke.Color = Color3.fromRGB(80, 80, 90)
-    stroke.Thickness = 2
-    
-    -- Draggable Logic
-    local dragging, dragInput, dragStart, startPos
-    toggleBtn.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true
-            dragStart = input.Position
-            startPos = toggleBtn.Position
-            
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then
-                    dragging = false
-                end
-            end)
-        end
-    end)
-    
-    toggleBtn.InputChanged:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-            dragInput = input
-        end
-    end)
-    
-    UserInputService.InputChanged:Connect(function(input)
-        if input == dragInput and dragging then
-            local delta = input.Position - dragStart
-            toggleBtn.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-        end
-    end)
-    
-    -- Toggle Logic (Same as G key)
-    toggleBtn.MouseButton1Click:Connect(function()
-        isCommander = true
-        
-        if not panelGui then
-            panelGui = createPanel()
-        end
-        
-        local panel = panelGui:FindFirstChild("MainPanel")
-        if not panel then return end
-
-        if not isPanelOpen then
-            -- Open
-            isPanelOpen = true
-            panelGui.Enabled = true
-            TweenService:Create(panel, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
-                Position = UDim2.new(1, -340, 0.5, -240)
-            }):Play()
-        else
-            -- Close
-            isPanelOpen = false
-            TweenService:Create(panel, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {
-                Position = UDim2.new(1, 0, 0.5, -240)
-            }):Play()
-            
-            task.delay(0.3, function()
-                if not isPanelOpen and panelGui then
-                    panelGui.Enabled = false
-                end
-            end)
-        end
-    end)
-    
-    screenGui.Parent = LocalPlayer.PlayerGui
-    return screenGui
-end
-
-createMobileToggle()
-sendNotify("Army Script", "Press G or use Button to toggle Panel | F3 to Exit")
+sendNotify("Army Script", "Press G to toggle Panel | F3 to Exit")
 print("Army Soldier loaded - Press G for panel")
