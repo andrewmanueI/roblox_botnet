@@ -330,103 +330,215 @@ local function createPanel()
         end
     })
     
-    -- Follow button (with toggle state)
-    local followButton = createButton({
-        Title = "Follow Player",
-        Description = "Click a player to follow them",
-        Icon = "👤",
-        Color = Color3.fromRGB(255, 200, 100),
-        Callback = function() end -- Will be set below
-    })
-    
-    -- Store references to button elements for updating
-    local followButtonFrame = followButton
-    local followButtonTitle = followButton:FindFirstChild("TextLabel", true)
-    local followButtonIcon = followButton:FindFirstChildWhichIsA("TextLabel")
-    
-    -- Function to update follow button appearance
-    local function updateFollowButton()
-        if followTargetUserId then
-            -- Active state - green
-            local activeColor = Color3.fromRGB(40, 120, 60)
-            local activeHover = Color3.fromRGB(50, 140, 70)
+    -- Helper function to create drawer with sub-buttons
+    local function createDrawer(config)
+        -- Container for the whole drawer
+        local drawerContainer = Instance.new("Frame", commandsContainer)
+        drawerContainer.Size = UDim2.new(1, 0, 0, 50) -- Start collapsed (only header visible)
+        drawerContainer.BackgroundTransparency = 1
+        drawerContainer.ClipsDescendants = true
+        
+        -- Header Button (Acts as toggle)
+        local headerBtn = Instance.new("TextButton", drawerContainer)
+        headerBtn.Size = UDim2.new(1, 0, 0, 50)
+        headerBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
+        headerBtn.BorderSizePixel = 0
+        headerBtn.AutoButtonColor = false
+        headerBtn.Text = ""
+        headerBtn.ZIndex = 2
+        
+        local headerCorner = Instance.new("UICorner", headerBtn)
+        headerCorner.CornerRadius = UDim.new(0, 8)
+        
+        local headerStroke = Instance.new("UIStroke", headerBtn)
+        headerStroke.Color = Color3.fromRGB(55, 55, 65)
+        headerStroke.Thickness = 1
+        headerStroke.Transparency = 0.7
+        
+        -- Header Icon
+        local icon = Instance.new("TextLabel", headerBtn)
+        icon.Size = UDim2.new(0, 40, 1, 0)
+        icon.Position = UDim2.new(0, 10, 0, 0)
+        icon.BackgroundTransparency = 1
+        icon.Text = config.Icon
+        icon.TextColor3 = config.Color or Color3.fromRGB(120, 180, 255)
+        icon.TextSize = 20
+        icon.Font = Enum.Font.GothamBold
+        
+        -- Header Title
+        local title = Instance.new("TextLabel", headerBtn)
+        title.Size = UDim2.new(1, -70, 0, 20)
+        title.Position = UDim2.new(0, 60, 0, 10)
+        title.BackgroundTransparency = 1
+        title.Text = config.Title
+        title.TextColor3 = Color3.fromRGB(255, 255, 255)
+        title.TextSize = 14
+        title.Font = Enum.Font.GothamBold
+        title.TextXAlignment = Enum.TextXAlignment.Left
+        
+        -- Header Description
+        local desc = Instance.new("TextLabel", headerBtn)
+        desc.Size = UDim2.new(1, -70, 0, 16)
+        desc.Position = UDim2.new(0, 60, 0, 28)
+        desc.BackgroundTransparency = 1
+        desc.Text = config.Description
+        desc.TextColor3 = Color3.fromRGB(150, 150, 160)
+        desc.TextSize = 11
+        desc.Font = Enum.Font.Gotham
+        desc.TextXAlignment = Enum.TextXAlignment.Left
+        
+        -- Chevron Icon
+        local chevron = Instance.new("TextLabel", headerBtn)
+        chevron.Size = UDim2.new(0, 20, 0, 20)
+        chevron.Position = UDim2.new(1, -30, 0.5, -10)
+        chevron.BackgroundTransparency = 1
+        chevron.Text = "▼"
+        chevron.TextColor3 = Color3.fromRGB(150, 150, 160)
+        chevron.TextSize = 14
+        
+        -- Content Container (Sub-buttons)
+        local contentContainer = Instance.new("Frame", drawerContainer)
+        contentContainer.Size = UDim2.new(1, 0, 0, 0)
+        contentContainer.Position = UDim2.new(0, 0, 0, 50)
+        contentContainer.BackgroundTransparency = 1
+        contentContainer.AutomaticSize = Enum.AutomaticSize.Y
+        
+        local contentList = Instance.new("UIListLayout", contentContainer)
+        contentList.SortOrder = Enum.SortOrder.LayoutOrder
+        contentList.Padding = UDim.new(0, 4)
+        
+        -- Sub-button creator (simpler design)
+        local function createSubButton(subConfig)
+            local subBtn = Instance.new("TextButton", contentContainer)
+            subBtn.Size = UDim2.new(1, -20, 0, 40) -- Indented width
+            subBtn.Position = UDim2.new(0, 0, 0, 0) -- Handled by layout, but offset by padding
+            -- Add margin using a transparent frame or wrapper if needed, but centering in list is easier
+            -- Actually textbutton doesn't support margin directly in listlayout.
+            -- Best to use a wrapper frame for indentation or just modify size/pos in button.
             
-            followButtonFrame:SetAttribute("BaseColor", activeColor)
-            followButtonFrame:SetAttribute("HoverColor", activeHover)
-            followButtonFrame.BackgroundColor3 = activeColor
+            -- Let's just make it slightly narrower and centered
+            local wrapper = Instance.new("Frame", contentContainer)
+            wrapper.Size = UDim2.new(1, 0, 0, 40)
+            wrapper.BackgroundTransparency = 1
             
-            if followButtonTitle then
-                followButtonTitle.Text = "Currently Following"
+            local actualBtn = Instance.new("TextButton", wrapper)
+            actualBtn.Size = UDim2.new(1, -20, 1, 0)
+            actualBtn.Position = UDim2.new(0, 20, 0, 0) -- 20px ident
+            actualBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+            actualBtn.BorderSizePixel = 0
+            actualBtn.Text = subConfig.Text
+            actualBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+            actualBtn.Font = Enum.Font.GothamSemibold
+            actualBtn.TextSize = 13
+            actualBtn.AutoButtonColor = true
+            
+            local subCorner = Instance.new("UICorner", actualBtn)
+            subCorner.CornerRadius = UDim.new(0, 6)
+            
+            if subConfig.Color then
+                actualBtn.TextColor3 = subConfig.Color
             end
-            if followButtonIcon then
-                followButtonIcon.TextColor3 = Color3.fromRGB(100, 255, 150)
-            end
-        else
-            -- Inactive state - default
-            local defaultColor = Color3.fromRGB(35, 35, 42)
-            local defaultHover = Color3.fromRGB(45, 45, 55)
             
-            followButtonFrame:SetAttribute("BaseColor", defaultColor)
-            followButtonFrame:SetAttribute("HoverColor", defaultHover)
-            followButtonFrame.BackgroundColor3 = defaultColor
-            
-            if followButtonTitle then
-                followButtonTitle.Text = "Follow Player"
+            actualBtn.MouseButton1Click:Connect(subConfig.Callback)
+            return actualBtn
+        end
+        
+        -- Toggle Logic
+        local isOpen = false
+        headerBtn.MouseButton1Click:Connect(function()
+            isOpen = not isOpen
+            if isOpen then
+                -- Expand
+                chevron.Text = "▲"
+                drawerContainer:TweenSize(UDim2.new(1, 0, 0, 50 + contentList.AbsoluteContentSize.Y + 10), Enum.EasingDirection.Out, Enum.EasingStyle.Quart, 0.3, true)
+            else
+                -- Collapse
+                chevron.Text = "▼"
+                drawerContainer:TweenSize(UDim2.new(1, 0, 0, 50), Enum.EasingDirection.In, Enum.EasingStyle.Quart, 0.3, true)
             end
-            if followButtonIcon then
-                followButtonIcon.TextColor3 = Color3.fromRGB(255, 200, 100)
+        end)
+        
+        -- Create sub-buttons from config
+        if config.Buttons then
+            for _, btnConfig in ipairs(config.Buttons) do
+                createSubButton(btnConfig)
             end
         end
+        
+        return {
+            Container = drawerContainer,
+            ContentList = contentList,
+            SetOpen = function(open)
+                isOpen = open
+                 if isOpen then
+                    chevron.Text = "▲"
+                    drawerContainer.Size = UDim2.new(1, 0, 0, 50 + contentList.AbsoluteContentSize.Y + 10)
+                else
+                    chevron.Text = "▼"
+                    drawerContainer.Size = UDim2.new(1, 0, 0, 50)
+                end
+            end
+        }
     end
     
-    -- Initialize button state based on current followTargetUserId
-    updateFollowButton()
-    
-    -- Set the actual callback
-    followButton.MouseButton1Click:Connect(function()
-        if followTargetUserId then
-            -- Stop following
-            sendCommand("stop_follow")
-            stopFollowing()
-            sendNotify("Command", "Stopped following")
-            updateFollowButton()
-        else
-            -- Start following
-            sendNotify("Follow Mode", "Click on a player to follow")
-            local highlights = highlightPlayers()
-            
-            local clickConnection
-            clickConnection = Mouse.Button1Down:Connect(function()
-                local target = Mouse.Target
-                if target then
-                    local character = target:FindFirstAncestorOfClass("Model")
-                    if character then
-                        local player = Players:GetPlayerFromCharacter(character)
-                        if player and player ~= LocalPlayer then
-                            local followCmd = string.format("follow %d", player.UserId)
-                            sendCommand(followCmd)
-                            sendNotify("Following", player.Name)
-                            
-                            -- Update local state
-                            followTargetUserId = player.UserId
-                            updateFollowButton()
-                            
-                            clearHighlights(highlights)
-                            clickConnection:Disconnect()
+    -- Follow Drawer
+    local followDrawer = createDrawer({
+        Title = "Follow Actions",
+        Description = "Manage following behavior",
+        Icon = "👤",
+        Color = Color3.fromRGB(255, 200, 100),
+        Buttons = {
+            {
+                Text = "Follow Player",
+                Color = Color3.fromRGB(150, 255, 150),
+                Callback = function()
+                    sendNotify("Follow Mode", "Click on a player to follow")
+                    local highlights = highlightPlayers()
+                    
+                    local clickConnection
+                    clickConnection = Mouse.Button1Down:Connect(function()
+                        local target = Mouse.Target
+                        if target then
+                            local character = target:FindFirstAncestorOfClass("Model")
+                            if character then
+                                local player = Players:GetPlayerFromCharacter(character)
+                                if player and player ~= LocalPlayer then
+                                    local followCmd = string.format("follow %d", player.UserId)
+                                    sendCommand(followCmd)
+                                    sendNotify("Following", player.Name)
+                                    followTargetUserId = player.UserId
+                                    
+                                    clearHighlights(highlights)
+                                    clickConnection:Disconnect()
+                                end
+                            end
                         end
+                    end)
+                    
+                    task.delay(10, function()
+                        if clickConnection then
+                            clickConnection:Disconnect()
+                            clearHighlights(highlights)
+                            sendNotify("Follow Mode", "Cancelled")
+                        end
+                    end)
+                end
+            },
+            {
+                Text = "Stop Following",
+                Color = Color3.fromRGB(255, 100, 100),
+                Callback = function()
+                    if followTargetUserId then
+                        sendCommand("stop_follow")
+                        stopFollowing()
+                        sendNotify("Command", "Stopped following")
+                    else
+                         sendNotify("Info", "Not currently following anyone")
                     end
                 end
-            end)
-            
-            task.delay(10, function()
-                if clickConnection then
-                    clickConnection:Disconnect()
-                    clearHighlights(highlights)
-                    sendNotify("Follow Mode", "Cancelled")
-                end
-            end)
-        end
-    end)
+            }
+        }
+    })
     
     createButton({
         Title = "Join My Server",
