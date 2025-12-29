@@ -1,0 +1,10 @@
+# Ignore Backend Files
+army_server.js
+army_commander.js
+node_modules/
+package.json
+package-lock.json
+
+# Ignore System Files
+.DS_Store
+Thumbs.db
