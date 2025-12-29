@@ -261,73 +261,72 @@ local function createPanel()
     end
     
     -- Create command buttons
-    createButton({
-        Title = "Jump",
-        Description = "Make all soldiers jump",
-        Icon = "↑",
+    -- Movement Drawer
+    local movementDrawer = createDrawer({
+        Title = "Movement",
+        Description = "Control army movement",
+        Icon = "🏃",
         Color = Color3.fromRGB(100, 200, 255),
-        Callback = function()
-            sendCommand("jump")
-            sendNotify("Command", "Jump executed")
-        end
-    })
-    
-    createButton({
-        Title = "Goto Mouse",
-        Description = "Soldiers walk to clicked location",
-        Icon = "🚶",
-        Color = Color3.fromRGB(100, 200, 255),
-        Callback = function()
-            sendNotify("Goto Mode", "Click where you want soldiers to walk")
-            
-            local clickConnection
-            clickConnection = Mouse.Button1Down:Connect(function()
-                if Mouse.Hit then
-                    local targetPos = Mouse.Hit.Position
-                    local gotoCmd = string.format("goto %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
-                    sendCommand(gotoCmd)
-                    sendNotify("Goto", "Soldiers walking to location")
-                    clickConnection:Disconnect()
+        Buttons = {
+            {
+                Text = "Jump",
+                Color = Color3.fromRGB(100, 220, 255),
+                Callback = function()
+                    sendCommand("jump")
+                    sendNotify("Command", "Jump executed")
                 end
-            end)
-            
-            -- Auto-cancel after 10 seconds
-            task.delay(10, function()
-                if clickConnection then
-                    clickConnection:Disconnect()
-                    sendNotify("Goto Mode", "Cancelled")
+            },
+            {
+                Text = "Goto Mouse (Walk)",
+                Color = Color3.fromRGB(100, 200, 255),
+                Callback = function()
+                    sendNotify("Goto Mode", "Click where you want soldiers to walk")
+                    
+                    local clickConnection
+                    clickConnection = Mouse.Button1Down:Connect(function()
+                        if Mouse.Hit then
+                            local targetPos = Mouse.Hit.Position
+                            local gotoCmd = string.format("goto %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
+                            sendCommand(gotoCmd)
+                            sendNotify("Goto", "Soldiers walking to location")
+                            clickConnection:Disconnect()
+                        end
+                    end)
+                    
+                    task.delay(10, function()
+                        if clickConnection then
+                            clickConnection:Disconnect()
+                            sendNotify("Goto Mode", "Cancelled")
+                        end
+                    end)
                 end
-            end)
-        end
-    })
-    
-    createButton({
-        Title = "Force Goto",
-        Description = "Teleport soldiers to clicked location",
-        Icon = "⚡",
-        Color = Color3.fromRGB(255, 120, 200),
-        Callback = function()
-            sendNotify("Force Goto", "Click where to teleport soldiers")
-            
-            local clickConnection
-            clickConnection = Mouse.Button1Down:Connect(function()
-                if Mouse.Hit then
-                    local targetPos = Mouse.Hit.Position
-                    local forceGotoCmd = string.format("bring %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
-                    sendCommand(forceGotoCmd)
-                    sendNotify("Force Goto", "Teleporting soldiers")
-                    clickConnection:Disconnect()
+            },
+            {
+                Text = "Force Goto (Teleport)",
+                Color = Color3.fromRGB(255, 120, 200),
+                Callback = function()
+                    sendNotify("Force Goto", "Click where to teleport soldiers")
+                    
+                    local clickConnection
+                    clickConnection = Mouse.Button1Down:Connect(function()
+                        if Mouse.Hit then
+                            local targetPos = Mouse.Hit.Position
+                            local forceGotoCmd = string.format("bring %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
+                            sendCommand(forceGotoCmd)
+                            sendNotify("Force Goto", "Teleporting soldiers")
+                            clickConnection:Disconnect()
+                        end
+                    end)
+                    
+                    task.delay(10, function()
+                        if clickConnection then
+                            clickConnection:Disconnect()
+                            sendNotify("Force Goto", "Cancelled")
+                        end
+                    end)
                 end
-            end)
-            
-            -- Auto-cancel after 10 seconds
-            task.delay(10, function()
-                if clickConnection then
-                    clickConnection:Disconnect()
-                    sendNotify("Force Goto", "Cancelled")
-                end
-            end)
-        end
+            }
+        }
     })
     
     -- Helper function to create drawer with sub-buttons
@@ -553,49 +552,57 @@ local function createPanel()
         }
     })
     
-    createButton({
-        Title = "Join My Server",
-        Description = "Bring soldiers to your server",
+    -- Server Actions Drawer
+    local serverDrawer = createDrawer({
+        Title = "Server Actions",
+        Description = "Manage server connections",
         Icon = "🌐",
         Color = Color3.fromRGB(150, 120, 255),
-        Callback = function()
-            local joinCmd = string.format("join_server %s %s", tostring(game.PlaceId), game.JobId)
-            sendCommand(joinCmd)
-            sendNotify("Command", "Broadcasting Server Info...")
-        end
+        Buttons = {
+            {
+                Text = "Join My Server",
+                Color = Color3.fromRGB(150, 120, 255),
+                Callback = function()
+                    local joinCmd = string.format("join_server %s %s", tostring(game.PlaceId), game.JobId)
+                    sendCommand(joinCmd)
+                    sendNotify("Command", "Broadcasting Server Info...")
+                end
+            },
+            {
+                Text = "Rejoin Server",
+                Color = Color3.fromRGB(255, 100, 150),
+                Callback = function()
+                    sendCommand("rejoin")
+                    sendNotify("Command", "Rejoin executed")
+                end
+            }
+        }
     })
     
-    createButton({
-        Title = "Reset Character",
-        Description = "Reset all soldier characters",
-        Icon = "⟲",
-        Color = Color3.fromRGB(255, 150, 100),
-        Callback = function()
-            sendCommand("reset")
-            sendNotify("Command", "Reset executed")
-        end
-    })
-    
-    createButton({
-        Title = "Reload Script",
-        Description = "Reload script for all soldiers",
-        Icon = "↻",
-        Color = Color3.fromRGB(100, 255, 200),
-        Callback = function()
-            sendCommand("reload")
-            sendNotify("System", "Reloading all soldiers...")
-        end
-    })
-    
-    createButton({
-        Title = "Rejoin",
-        Description = "Rejoin current server",
-        Icon = "⇄",
-        Color = Color3.fromRGB(255, 100, 150),
-        Callback = function()
-            sendCommand("rejoin")
-            sendNotify("Command", "Rejoin executed")
-        end
+    -- System Drawer
+    local systemDrawer = createDrawer({
+        Title = "System",
+        Description = "Script and character management",
+        Icon = "⚙️",
+        Color = Color3.fromRGB(200, 200, 210),
+        Buttons = {
+            {
+                Text = "Reset Character",
+                Color = Color3.fromRGB(255, 150, 100),
+                Callback = function()
+                    sendCommand("reset")
+                    sendNotify("Command", "Reset executed")
+                end
+            },
+            {
+                Text = "Reload Script",
+                Color = Color3.fromRGB(100, 255, 200),
+                Callback = function()
+                    sendCommand("reload")
+                    sendNotify("System", "Reloading all soldiers...")
+                end
+            }
+        }
     })
     
     screenGui.Parent = LocalPlayer.PlayerGui
