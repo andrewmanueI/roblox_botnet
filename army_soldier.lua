@@ -557,6 +557,8 @@ local function createPanel()
                         followMode = "Line"
                     elseif followMode == "Line" then
                         followMode = "Circle"
+                    elseif followMode == "Circle" then
+                        followMode = "Force"
                     else
                         followMode = "Normal"
                     end
@@ -769,7 +771,17 @@ local function startFollowing(userId, mode)
                     targetPos = targetPos + Vector3.new(math.random(-2,2), 0, math.random(-2,2))
                 end
                 
-                LocalPlayer.Character.Humanoid:MoveTo(targetPos)
+                if mode == "Force" then
+                    -- Force uses tweening for absolute locking
+                    local hrp = LocalPlayer.Character.HumanoidRootPart
+                    local tweenInfo = TweenInfo.new(0.1, Enum.EasingStyle.Linear)
+                    TweenService:Create(hrp, tweenInfo, {CFrame = CFrame.new(targetPos)}):Play()
+                    
+                    -- Disable physics/gravity interference
+                    hrp.Velocity = Vector3.new(0,0,0)
+                else
+                    LocalPlayer.Character.Humanoid:MoveTo(targetPos)
+                end
             end
         end
     end)
