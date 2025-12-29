@@ -99,7 +99,12 @@ local function terminateScript()
     for _, conn in ipairs(connections) do
         if conn then conn:Disconnect() end
     end
-    if panelGui then panelGui:Destroy() end
+    if panelGui then 
+        panelGui:Destroy()
+        panelGui = nil
+    end
+    isPanelOpen = false
+    isCommander = false
     stopFollowing()
 end
 
