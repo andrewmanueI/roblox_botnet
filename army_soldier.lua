@@ -15,9 +15,94 @@ local isRunning = true
 local isCommander = false
 local connections = {}
 
-
 local panelGui = nil
 local isPanelOpen = false
+local followConnection = nil
+local followTargetUserId = nil
+
+-- Helper functions must be defined before createPanel
+local function sendNotify(title, text)
+    game:GetService("StarterGui"):SetCore("SendNotification", {
+        Title = title,
+        Text = text,
+        Duration = 3
+    })
+end
+
+local function sendCommand(cmd)
+    task.spawn(function()
+        local request = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
+        if request then
+            request({
+                Url = SERVER_URL,
+                Method = "POST",
+                Body = cmd,
+                Headers = { ["Content-Type"] = "text/plain" }
+            })
+        else
+            pcall(function() game:HttpPost(SERVER_URL, cmd) end)
+        end
+    end)
+end
+
+local function highlightPlayers()
+    local highlights = {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+            local highlight = Instance.new("Highlight")
+            highlight.FillColor = Color3.fromRGB(255, 255, 0)
+            highlight.OutlineColor = Color3.fromRGB(255, 200, 0)
+            highlight.FillTransparency = 0.5
+            highlight.OutlineTransparency = 0
+            highlight.Parent = player.Character
+            table.insert(highlights, highlight)
+        end
+    end
+    return highlights
+end
+
+local function clearHighlights(highlights)
+    for _, h in ipairs(highlights) do
+        if h then h:Destroy() end
+    end
+end
+
+local function startFollowing(userId)
+    if followConnection then
+        followConnection:Disconnect()
+    end
+    
+    followTargetUserId = userId
+    
+    followConnection = RunService.Heartbeat:Connect(function()
+        local targetPlayer = Players:GetPlayerByUserId(userId)
+        if targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
+            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+                local targetPos = targetPlayer.Character.HumanoidRootPart.Position
+                LocalPlayer.Character.Humanoid:MoveTo(targetPos)
+            end
+        end
+    end)
+end
+
+local function stopFollowing()
+    if followConnection then
+        followConnection:Disconnect()
+        followConnection = nil
+    end
+    followTargetUserId = nil
+end
+
+local function terminateScript()
+    isRunning = false
+    sendNotify("Army Script", "Script Terminated")
+    for _, conn in ipairs(connections) do
+        if conn then conn:Disconnect() end
+    end
+    if panelGui then panelGui:Destroy() end
+    stopFollowing()
+end
+
 
 -- Create Modern Sidebar Panel
 local function createPanel()
