@@ -409,21 +409,14 @@ local function createPanel()
         
         -- Sub-button creator (simpler design)
         local function createSubButton(subConfig)
-            local subBtn = Instance.new("TextButton", contentContainer)
-            subBtn.Size = UDim2.new(1, -20, 0, 40) -- Indented width
-            subBtn.Position = UDim2.new(0, 0, 0, 0) -- Handled by layout, but offset by padding
-            -- Add margin using a transparent frame or wrapper if needed, but centering in list is easier
-            -- Actually textbutton doesn't support margin directly in listlayout.
-            -- Best to use a wrapper frame for indentation or just modify size/pos in button.
-            
-            -- Let's just make it slightly narrower and centered
+            -- Wrapper for indentation and spacing
             local wrapper = Instance.new("Frame", contentContainer)
-            wrapper.Size = UDim2.new(1, 0, 0, 40)
+            wrapper.Size = UDim2.new(1, 0, 0, 45) -- Slightly taller for spacing
             wrapper.BackgroundTransparency = 1
             
             local actualBtn = Instance.new("TextButton", wrapper)
-            actualBtn.Size = UDim2.new(1, -20, 1, 0)
-            actualBtn.Position = UDim2.new(0, 20, 0, 0) -- 20px ident
+            actualBtn.Size = UDim2.new(1, -30, 0, 38)
+            actualBtn.Position = UDim2.new(0, 15, 0, 2) -- Centered with margin
             actualBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
             actualBtn.BorderSizePixel = 0
             actualBtn.Text = subConfig.Text
