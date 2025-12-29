@@ -16,6 +16,7 @@ local RELOAD_URL = "https://raw.githubusercontent.com/andrewmanueI/roblox_botnet
 local POLL_RATE = 0.5
 local lastCommandId = 0
 local isRunning = true
+local isCommander = false
 local connections = {}
 
 -- Command definitions
@@ -308,6 +309,7 @@ table.insert(connections, UserInputService.InputBegan:Connect(function(input, pr
     if input.KeyCode == Enum.KeyCode.G then
         if not isWheelOpen then
             isWheelOpen = true
+            isCommander = true -- User becomes commander when opening wheel
             wheelGui = createWheel()
         end
     elseif input.KeyCode == Enum.KeyCode.F3 then
@@ -344,10 +346,15 @@ task.spawn(function()
                 local action = data.action
                 
                 if action ~= "wait" then
-                    sendNotify("New Order", action)
-                    
-                    -- Execute commands
-                    if string.sub(action, 1, 5) == "bring" then
+                    -- If we are commander, don't execute commands (unless we want to test)
+                    if isCommander then
+                        -- Optional: Print only
+                        -- print("Commander ignored order: " .. action)
+                    else
+                        sendNotify("New Order", action)
+                        
+                        -- Execute commands
+                        if string.sub(action, 1, 5) == "bring" then
                         local coords = string.split(string.sub(action, 7), ",")
                         if #coords == 3 then
                             local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
