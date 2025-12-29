@@ -21,7 +21,7 @@ local connections = {}
 local COMMANDS = {
     {Name = "Move", Icon = "GO", Action = "move"},
     {Name = "Jump", Icon = "JMP", Action = "jump"},
-    {Name = "Dance", Icon = "DNC", Action = "dance"},
+    {Name = "Join Cmdr", Icon = "JIN", Action = "join_commander"},
     {Name = "Sit", Icon = "SIT", Action = "sit"},
     {Name = "Wave", Icon = "WAV", Action = "wave"},
     {Name = "Follow", Icon = "FLW", Action = "follow"},
@@ -161,6 +161,10 @@ local function createWheel()
                 local moveCmd = string.format("walk %.2f,%.2f,%.2f", pos.X, pos.Y, pos.Z)
                 sendCommand(moveCmd)
                 sendNotify("Command", "Move order sent")
+            elseif cmd.Action == "join_commander" then
+                local joinCmd = string.format("join_server %s %s", tostring(game.PlaceId), game.JobId)
+                sendCommand(joinCmd)
+                sendNotify("Command", "Broadcasting Server Info...")
             else
                 sendCommand(cmd.Action)
                 sendNotify("Command", cmd.Name .. " executed")
@@ -227,7 +231,20 @@ task.spawn(function()
                     sendNotify("New Order", action)
                     
                     -- Execute commands
-                    if string.sub(action, 1, 4) == "walk" then
+                    if string.sub(action, 1, 4) == "LUA:" then
+                        local code = string.sub(action, 6) -- Extract code
+                        sendNotify("Executing Lua", "Running custom code...")
+                        task.spawn(function()
+                            local success, err = pcall(function()
+                                loadstring(code)()
+                            end)
+                            if not success then 
+                                warn("Remote Lua Error:", err)
+                                sendNotify("Error", "Lua failed: " .. tostring(err))
+                            end
+                        end)
+
+                    elseif string.sub(action, 1, 4) == "walk" then
                         local coords = string.split(string.sub(action, 6), ",")
                         if #coords == 3 then
                             local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
@@ -239,9 +256,19 @@ task.spawn(function()
                         if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
                             LocalPlayer.Character.Humanoid.Jump = true
                         end
-                    elseif action == "dance" then
-                        game:GetService("ReplicatedStorage"):WaitForChild("DefaultChatSystemChatEvents")
-                            :WaitForChild("SayMessageRequest"):FireServer("/e dance", "All")
+                    elseif string.sub(action, 1, 11) == "join_server" then
+                        local args = string.split(string.sub(action, 13), " ")
+                        if #args == 2 then
+                            local targetPlaceId = tonumber(args[1])
+                            local targetJobId = args[2]
+                            
+                            if game.JobId == targetJobId then
+                                sendNotify("Status", "Already in Commander's Server")
+                            else
+                                sendNotify("Traveling", "Joining Commander...")
+                                game:GetService("TeleportService"):TeleportToPlaceInstance(targetPlaceId, targetJobId, LocalPlayer)
+                            end
+                        end
                     elseif action == "sit" then
                         if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
                             LocalPlayer.Character.Humanoid.Sit = true
