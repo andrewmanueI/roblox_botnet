@@ -332,41 +332,41 @@ local function createPanel()
     
     -- Helper function to create drawer with sub-buttons
     local function createDrawer(config)
-        -- Container for the whole drawer
+        -- Container for the whole drawer (The unified "Card")
         local drawerContainer = Instance.new("Frame", commandsContainer)
-        drawerContainer.Size = UDim2.new(1, 0, 0, 50) -- Start collapsed (only header visible)
-        drawerContainer.BackgroundTransparency = 1
+        drawerContainer.Size = UDim2.new(1, 0, 0, 50) -- Start collapsed
+        drawerContainer.BackgroundColor3 = Color3.fromRGB(35, 35, 42) -- Main card color
+        drawerContainer.BorderSizePixel = 0
         drawerContainer.ClipsDescendants = true
         
-        -- Header Button (Acts as toggle)
+        local drawerCorner = Instance.new("UICorner", drawerContainer)
+        drawerCorner.CornerRadius = UDim.new(0, 8)
+        
+        local drawerStroke = Instance.new("UIStroke", drawerContainer)
+        drawerStroke.Color = Color3.fromRGB(55, 55, 65)
+        drawerStroke.Thickness = 1
+        drawerStroke.Transparency = 0.7
+        
+        -- Header Button (Transparent interactive layer)
         local headerBtn = Instance.new("TextButton", drawerContainer)
         headerBtn.Size = UDim2.new(1, 0, 0, 50)
-        headerBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
-        headerBtn.BorderSizePixel = 0
-        headerBtn.AutoButtonColor = false
+        headerBtn.BackgroundTransparency = 1
         headerBtn.Text = ""
-        headerBtn.ZIndex = 2
-        
-        local headerCorner = Instance.new("UICorner", headerBtn)
-        headerCorner.CornerRadius = UDim.new(0, 8)
-        
-        local headerStroke = Instance.new("UIStroke", headerBtn)
-        headerStroke.Color = Color3.fromRGB(55, 55, 65)
-        headerStroke.Thickness = 1
-        headerStroke.Transparency = 0.7
+        headerBtn.ZIndex = 5
         
         -- Header Icon
-        local icon = Instance.new("TextLabel", headerBtn)
-        icon.Size = UDim2.new(0, 40, 1, 0)
+        local icon = Instance.new("TextLabel", drawerContainer)
+        icon.Size = UDim2.new(0, 40, 0, 50)
         icon.Position = UDim2.new(0, 10, 0, 0)
         icon.BackgroundTransparency = 1
         icon.Text = config.Icon
         icon.TextColor3 = config.Color or Color3.fromRGB(120, 180, 255)
         icon.TextSize = 20
         icon.Font = Enum.Font.GothamBold
+        icon.ZIndex = 2
         
         -- Header Title
-        local title = Instance.new("TextLabel", headerBtn)
+        local title = Instance.new("TextLabel", drawerContainer)
         title.Size = UDim2.new(1, -70, 0, 20)
         title.Position = UDim2.new(0, 60, 0, 10)
         title.BackgroundTransparency = 1
@@ -375,9 +375,10 @@ local function createPanel()
         title.TextSize = 14
         title.Font = Enum.Font.GothamBold
         title.TextXAlignment = Enum.TextXAlignment.Left
+        title.ZIndex = 2
         
         -- Header Description
-        local desc = Instance.new("TextLabel", headerBtn)
+        local desc = Instance.new("TextLabel", drawerContainer)
         desc.Size = UDim2.new(1, -70, 0, 16)
         desc.Position = UDim2.new(0, 60, 0, 28)
         desc.BackgroundTransparency = 1
@@ -386,15 +387,25 @@ local function createPanel()
         desc.TextSize = 11
         desc.Font = Enum.Font.Gotham
         desc.TextXAlignment = Enum.TextXAlignment.Left
+        desc.ZIndex = 2
         
         -- Chevron Icon
-        local chevron = Instance.new("TextLabel", headerBtn)
+        local chevron = Instance.new("TextLabel", drawerContainer)
         chevron.Size = UDim2.new(0, 20, 0, 20)
-        chevron.Position = UDim2.new(1, -30, 0.5, -10)
+        chevron.Position = UDim2.new(1, -30, 0, 15)
         chevron.BackgroundTransparency = 1
         chevron.Text = "▼"
         chevron.TextColor3 = Color3.fromRGB(150, 150, 160)
         chevron.TextSize = 14
+        chevron.ZIndex = 2
+        
+        -- Content Background (Inner dark area)
+        local contentBackground = Instance.new("Frame", drawerContainer)
+        contentBackground.Size = UDim2.new(1, 0, 1, -50)
+        contentBackground.Position = UDim2.new(0, 0, 0, 50)
+        contentBackground.BackgroundColor3 = Color3.fromRGB(25, 25, 30) -- Darker inner drawer
+        contentBackground.BorderSizePixel = 0
+        contentBackground.ZIndex = 1
         
         -- Content Container (Sub-buttons)
         local contentContainer = Instance.new("Frame", drawerContainer)
@@ -402,28 +413,37 @@ local function createPanel()
         contentContainer.Position = UDim2.new(0, 0, 0, 50)
         contentContainer.BackgroundTransparency = 1
         contentContainer.AutomaticSize = Enum.AutomaticSize.Y
+        contentContainer.ZIndex = 2
         
         local contentList = Instance.new("UIListLayout", contentContainer)
         contentList.SortOrder = Enum.SortOrder.LayoutOrder
         contentList.Padding = UDim.new(0, 4)
+        contentList.VerticalAlignment = Enum.VerticalAlignment.Top
         
-        -- Sub-button creator (simpler design)
+        -- Spacer for top padding inside drawer
+        local topSpacer = Instance.new("Frame", contentContainer)
+        topSpacer.Size = UDim2.new(1, 0, 0, 4)
+        topSpacer.BackgroundTransparency = 1
+        topSpacer.LayoutOrder = -1
+        
+        -- Sub-button creator
         local function createSubButton(subConfig)
-            -- Wrapper for indentation and spacing
+            -- Wrapper for formatting
             local wrapper = Instance.new("Frame", contentContainer)
-            wrapper.Size = UDim2.new(1, 0, 0, 45) -- Slightly taller for spacing
+            wrapper.Size = UDim2.new(1, 0, 0, 42)
             wrapper.BackgroundTransparency = 1
             
             local actualBtn = Instance.new("TextButton", wrapper)
-            actualBtn.Size = UDim2.new(1, -30, 0, 38)
-            actualBtn.Position = UDim2.new(0, 15, 0, 2) -- Centered with margin
-            actualBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+            actualBtn.Size = UDim2.new(1, -20, 1, 0)
+            actualBtn.Position = UDim2.new(0, 10, 0, 0) -- Centered with 10px margin
+            actualBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 50) -- Slightly lighter than drawer bg
             actualBtn.BorderSizePixel = 0
             actualBtn.Text = subConfig.Text
             actualBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
             actualBtn.Font = Enum.Font.GothamSemibold
             actualBtn.TextSize = 13
             actualBtn.AutoButtonColor = true
+            actualBtn.ZIndex = 3
             
             local subCorner = Instance.new("UICorner", actualBtn)
             subCorner.CornerRadius = UDim.new(0, 6)
