@@ -180,7 +180,15 @@ local function createPanel()
     local function createButton(config)
         local button = Instance.new("TextButton", commandsContainer)
         button.Size = UDim2.new(1, 0, 0, 50)
-        button.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
+        
+        -- Set initial colors and attributes
+        local initialColor = config.InitialColor or Color3.fromRGB(35, 35, 42)
+        button.BackgroundColor3 = initialColor
+        button:SetAttribute("BaseColor", initialColor)
+        
+        -- Default hover color is slightly lighter grey, can be overridden by attribute later
+        button:SetAttribute("HoverColor", Color3.fromRGB(45, 45, 55))
+        
         button.BorderSizePixel = 0
         button.AutoButtonColor = false
         button.Text = ""
@@ -225,10 +233,11 @@ local function createPanel()
         desc.Font = Enum.Font.Gotham
         desc.TextXAlignment = Enum.TextXAlignment.Left
         
-        -- Hover effect
+        -- Hover effect with dynamic colors
         button.MouseEnter:Connect(function()
+            local hoverColor = button:GetAttribute("HoverColor") or Color3.fromRGB(45, 45, 55)
             TweenService:Create(button, TweenInfo.new(0.2), {
-                BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+                BackgroundColor3 = hoverColor
             }):Play()
             TweenService:Create(buttonStroke, TweenInfo.new(0.2), {
                 Transparency = 0.3
@@ -236,8 +245,9 @@ local function createPanel()
         end)
         
         button.MouseLeave:Connect(function()
+            local baseColor = button:GetAttribute("BaseColor") or Color3.fromRGB(35, 35, 42)
             TweenService:Create(button, TweenInfo.new(0.2), {
-                BackgroundColor3 = Color3.fromRGB(35, 35, 42)
+                BackgroundColor3 = baseColor
             }):Play()
             TweenService:Create(buttonStroke, TweenInfo.new(0.2), {
                 Transparency = 0.7
@@ -338,16 +348,28 @@ local function createPanel()
     local function updateFollowButton()
         if followTargetUserId then
             -- Active state - green
-            followButtonFrame.BackgroundColor3 = Color3.fromRGB(40, 120, 60)
+            local activeColor = Color3.fromRGB(40, 120, 60)
+            local activeHover = Color3.fromRGB(50, 140, 70)
+            
+            followButtonFrame:SetAttribute("BaseColor", activeColor)
+            followButtonFrame:SetAttribute("HoverColor", activeHover)
+            followButtonFrame.BackgroundColor3 = activeColor
+            
             if followButtonTitle then
-                followButtonTitle.Text = "Stop Following"
+                followButtonTitle.Text = "Currently Following"
             end
             if followButtonIcon then
                 followButtonIcon.TextColor3 = Color3.fromRGB(100, 255, 150)
             end
         else
             -- Inactive state - default
-            followButtonFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
+            local defaultColor = Color3.fromRGB(35, 35, 42)
+            local defaultHover = Color3.fromRGB(45, 45, 55)
+            
+            followButtonFrame:SetAttribute("BaseColor", defaultColor)
+            followButtonFrame:SetAttribute("HoverColor", defaultHover)
+            followButtonFrame.BackgroundColor3 = defaultColor
+            
             if followButtonTitle then
                 followButtonTitle.Text = "Follow Player"
             end
