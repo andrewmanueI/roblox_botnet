@@ -2,6 +2,7 @@ local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 
 local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
@@ -121,8 +122,19 @@ local Window = WindUI:CreateWindow({
     },
 })
 
+-- Close window on initialization
+Window:Close()
+
 -- Mark as commander when window is opened
 isCommander = true
+
+-- G key toggle
+table.insert(connections, UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    if input.KeyCode == Enum.KeyCode.G then
+        Window:Toggle()
+    end
+end))
 
 -- Commands Tab
 local CommandsTab = Window:Tab({
