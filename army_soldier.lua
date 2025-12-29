@@ -246,9 +246,6 @@ local function createWheel()
                                     sendCommand(followCmd)
                                     sendNotify("Following", player.Name)
                                     
-                                    -- Start following locally too
-                                    startFollowing(player.UserId)
-                                    
                                     clearHighlights(highlights)
                                     clickConnection:Disconnect()
                                     
@@ -335,15 +332,11 @@ task.spawn(function()
                 local action = data.action
                 
                 if action ~= "wait" then
-                    -- If we are commander, don't execute commands (unless we want to test)
-                    if isCommander then
-                        -- Optional: Print only
-                        -- print("Commander ignored order: " .. action)
-                    else
-                        sendNotify("New Order", action)
-                        
-                        -- Execute commands
-                        if string.sub(action, 1, 5) == "bring" then
+                    sendNotify("New Order", action)
+                    
+                    -- Execute commands (check commander status for each, except reload)
+                    if string.sub(action, 1, 5) == "bring" then
+                        if not isCommander then
                             local coords = string.split(string.sub(action, 7), ",")
                             if #coords == 3 then
                                 local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
@@ -371,13 +364,17 @@ task.spawn(function()
                                     sendNotify("Moving", "Traveling to Commander...")
                                 end
                             end
-                            
-                        elseif action == "jump" then
+                        end
+                        
+                    elseif action == "jump" then
+                        if not isCommander then
                             if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
                                 LocalPlayer.Character.Humanoid.Jump = true
                             end
-                            
-                        elseif string.sub(action, 1, 11) == "join_server" then
+                        end
+                        
+                    elseif string.sub(action, 1, 11) == "join_server" then
+                        if not isCommander then
                             local args = string.split(string.sub(action, 13), " ")
                             if #args == 2 then
                                 local targetPlaceId = tonumber(args[1])
@@ -390,13 +387,17 @@ task.spawn(function()
                                     game:GetService("TeleportService"):TeleportToPlaceInstance(targetPlaceId, targetJobId, LocalPlayer)
                                 end
                             end
-                            
-                        elseif action == "reset" then
+                        end
+                        
+                    elseif action == "reset" then
+                        if not isCommander then
                             if LocalPlayer.Character then
                                 LocalPlayer.Character:BreakJoints()
                             end
-                            
-                        elseif string.sub(action, 1, 6) == "follow" then
+                        end
+                        
+                    elseif string.sub(action, 1, 6) == "follow" then
+                        if not isCommander then
                             local userId = tonumber(string.sub(action, 8))
                             if userId then
                                 startFollowing(userId)
@@ -405,25 +406,30 @@ task.spawn(function()
                                     sendNotify("Following", targetPlayer.Name)
                                 end
                             end
-                            
-                        elseif action == "stop_follow" then
+                        end
+                        
+                    elseif action == "stop_follow" then
+                        if not isCommander then
                             stopFollowing()
                             sendNotify("Status", "Stopped following")
-                            
-                        elseif action == "reload" then
-                            sendNotify("System", "Reloading Script...")
-                            terminateScript()
-                            task.spawn(function()
-                                -- Add timestamp to bypass GitHub CDN cache
-                                local reloadUrl = RELOAD_URL .. "?t=" .. os.time()
-                                loadstring(game:HttpGet(reloadUrl))()
-                            end)
-                            
-                        elseif action == "rejoin" then
+                        end
+                        
+                    elseif action == "reload" then
+                        -- Reload works for everyone (commander and soldiers)
+                        sendNotify("System", "Reloading Script...")
+                        terminateScript()
+                        task.spawn(function()
+                            -- Add timestamp to bypass GitHub CDN cache
+                            local reloadUrl = RELOAD_URL .. "?t=" .. os.time()
+                            loadstring(game:HttpGet(reloadUrl))()
+                        end)
+                        
+                    elseif action == "rejoin" then
+                        if not isCommander then
                             game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
                         end
+                    end
                 end
-            end
             end
         end
     end
