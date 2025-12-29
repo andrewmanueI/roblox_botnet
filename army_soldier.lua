@@ -301,49 +301,88 @@ local function createPanel()
         end
     })
     
-    createButton({
-        Title = followTargetUserId and "Stop Following" or "Follow Player",
+    -- Follow button (with toggle state)
+    local followButton = createButton({
+        Title = "Follow Player",
         Description = "Click a player to follow them",
         Icon = "👤",
         Color = Color3.fromRGB(255, 200, 100),
-        Callback = function()
-            if followTargetUserId then
-                sendCommand("stop_follow")
-                stopFollowing()
-                sendNotify("Command", "Stopped following")
-            else
-                sendNotify("Follow Mode", "Click on a player to follow")
-                local highlights = highlightPlayers()
-                
-                local clickConnection
-                clickConnection = Mouse.Button1Down:Connect(function()
-                    local target = Mouse.Target
-                    if target then
-                        local character = target:FindFirstAncestorOfClass("Model")
-                        if character then
-                            local player = Players:GetPlayerFromCharacter(character)
-                            if player and player ~= LocalPlayer then
-                                local followCmd = string.format("follow %d", player.UserId)
-                                sendCommand(followCmd)
-                                sendNotify("Following", player.Name)
-                                
-                                clearHighlights(highlights)
-                                clickConnection:Disconnect()
-                            end
-                        end
-                    end
-                end)
-                
-                task.delay(10, function()
-                    if clickConnection then
-                        clickConnection:Disconnect()
-                        clearHighlights(highlights)
-                        sendNotify("Follow Mode", "Cancelled")
-                    end
-                end)
+        Callback = function() end -- Will be set below
+    })
+    
+    -- Store references to button elements for updating
+    local followButtonFrame = followButton
+    local followButtonTitle = followButton:FindFirstChild("TextLabel", true)
+    local followButtonIcon = followButton:FindFirstChildWhichIsA("TextLabel")
+    
+    -- Function to update follow button appearance
+    local function updateFollowButton()
+        if followTargetUserId then
+            -- Active state - green
+            followButtonFrame.BackgroundColor3 = Color3.fromRGB(40, 120, 60)
+            if followButtonTitle then
+                followButtonTitle.Text = "Stop Following"
+            end
+            if followButtonIcon then
+                followButtonIcon.TextColor3 = Color3.fromRGB(100, 255, 150)
+            end
+        else
+            -- Inactive state - default
+            followButtonFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
+            if followButtonTitle then
+                followButtonTitle.Text = "Follow Player"
+            end
+            if followButtonIcon then
+                followButtonIcon.TextColor3 = Color3.fromRGB(255, 200, 100)
             end
         end
-    })
+    end
+    
+    -- Set the actual callback
+    followButton.MouseButton1Click:Connect(function()
+        if followTargetUserId then
+            -- Stop following
+            sendCommand("stop_follow")
+            stopFollowing()
+            sendNotify("Command", "Stopped following")
+            updateFollowButton()
+        else
+            -- Start following
+            sendNotify("Follow Mode", "Click on a player to follow")
+            local highlights = highlightPlayers()
+            
+            local clickConnection
+            clickConnection = Mouse.Button1Down:Connect(function()
+                local target = Mouse.Target
+                if target then
+                    local character = target:FindFirstAncestorOfClass("Model")
+                    if character then
+                        local player = Players:GetPlayerFromCharacter(character)
+                        if player and player ~= LocalPlayer then
+                            local followCmd = string.format("follow %d", player.UserId)
+                            sendCommand(followCmd)
+                            sendNotify("Following", player.Name)
+                            
+                            -- Update local state
+                            followTargetUserId = player.UserId
+                            updateFollowButton()
+                            
+                            clearHighlights(highlights)
+                            clickConnection:Disconnect()
+                        end
+                    end
+                end
+            end)
+            
+            task.delay(10, function()
+                if clickConnection then
+                    clickConnection:Disconnect()
+                    clearHighlights(highlights)
+                    sendNotify("Follow Mode", "Cancelled")
+                end
+            end)
+        end
+    end)
     
     createButton({
         Title = "Join My Server",
