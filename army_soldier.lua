@@ -1,7 +1,3 @@
--- [[ ARMY SOLDIER - GTA 5 WHEEL UI ]]
--- Hold G to open command wheel
--- F3 to terminate script
-
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
