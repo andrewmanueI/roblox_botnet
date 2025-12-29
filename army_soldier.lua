@@ -22,12 +22,64 @@ local COMMANDS = {
     {Name = "Jump", Icon = "JUMP", Action = "jump"},
     {Name = "Join Cmdr", Icon = "JOIN", Action = "join_commander"},
     {Name = "Bring", Icon = "BRING", Action = "bring"},
+    {Name = "Follow", Icon = "FOLLOW", Action = "follow"},
     {Name = "Reset", Icon = "RESET", Action = "reset"},
     {Name = "Rejoin", Icon = "REJOIN", Action = "rejoin"}
 }
 
 local wheelGui = nil
 local isWheelOpen = false
+local followConnection = nil
+local followTargetUserId = nil
+
+-- Follow helper functions
+local function highlightPlayers()
+    local highlights = {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+            local highlight = Instance.new("Highlight")
+            highlight.FillColor = Color3.fromRGB(255, 255, 0)
+            highlight.OutlineColor = Color3.fromRGB(255, 200, 0)
+            highlight.FillTransparency = 0.5
+            highlight.OutlineTransparency = 0
+            highlight.Parent = player.Character
+            table.insert(highlights, highlight)
+        end
+    end
+    return highlights
+end
+
+local function clearHighlights(highlights)
+    for _, h in ipairs(highlights) do
+        if h then h:Destroy() end
+    end
+end
+
+local function startFollowing(userId)
+    if followConnection then
+        followConnection:Disconnect()
+    end
+    
+    followTargetUserId = userId
+    
+    followConnection = RunService.Heartbeat:Connect(function()
+        local targetPlayer = Players:GetPlayerByUserId(userId)
+        if targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
+            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+                local targetPos = targetPlayer.Character.HumanoidRootPart.Position
+                LocalPlayer.Character.Humanoid:MoveTo(targetPos)
+            end
+        end
+    end)
+end
+
+local function stopFollowing()
+    if followConnection then
+        followConnection:Disconnect()
+        followConnection = nil
+    end
+    followTargetUserId = nil
+end
 
 local function sendNotify(title, text)
     game:GetService("StarterGui"):SetCore("SendNotification", {
@@ -133,7 +185,12 @@ local function createWheel()
         nameLabel.Size = UDim2.new(1, 0, 0.4, 0)
         nameLabel.Position = UDim2.new(0, 0, 0.6, 0)
         nameLabel.BackgroundTransparency = 1
-        nameLabel.Text = cmd.Name
+        -- Dynamic text for Follow button
+        if cmd.Action == "follow" then
+            nameLabel.Text = followTargetUserId and "Stop Follow" or "Follow"
+        else
+            nameLabel.Text = cmd.Name
+        end
         nameLabel.TextSize = 12
         nameLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
         nameLabel.Font = Enum.Font.Gotham
@@ -160,6 +217,57 @@ local function createWheel()
                     sendCommand(bringCmd)
                     sendNotify("Command", "Bringing soldiers to you...")
                 end
+                
+            elseif cmd.Action == "follow" then
+                -- Toggle follow mode
+                if followTargetUserId then
+                    -- Stop following
+                    sendCommand("stop_follow")
+                    stopFollowing()
+                    sendNotify("Command", "Stopped following")
+                else
+                    -- Enter targeting mode
+                    sendNotify("Follow Mode", "Click on a player to follow")
+                    local highlights = highlightPlayers()
+                    
+                    -- Wait for click on a player
+                    local clickConnection
+                    clickConnection = Mouse.Button1Down:Connect(function()
+                        local target = Mouse.Target
+                        if target then
+                            local character = target:FindFirstAncestorOfClass("Model")
+                            if character then
+                                local player = Players:GetPlayerFromCharacter(character)
+                                if player and player ~= LocalPlayer then
+                                    -- Found valid target
+                                    local followCmd = string.format("follow %d", player.UserId)
+                                    sendCommand(followCmd)
+                                    sendNotify("Following", player.Name)
+                                    
+                                    -- Start following locally too
+                                    startFollowing(player.UserId)
+                                    
+                                    clearHighlights(highlights)
+                                    clickConnection:Disconnect()
+                                    
+                                    -- Close wheel on success
+                                    isWheelOpen = false
+                                    if wheelGui then wheelGui:Destroy() end
+                                end
+                            end
+                        end
+                    end)
+                    
+                    -- Auto-cancel after 10 seconds
+                    task.delay(10, function()
+                        if clickConnection then
+                            clickConnection:Disconnect()
+                            clearHighlights(highlights)
+                            sendNotify("Follow Mode", "Cancelled")
+                        end
+                    end)
+                end
+                
             elseif cmd.Action == "join_commander" then
                 local joinCmd = string.format("join_server %s %s", tostring(game.PlaceId), game.JobId)
                 sendCommand(joinCmd)
@@ -169,9 +277,11 @@ local function createWheel()
                 sendNotify("Command", cmd.Name .. " executed")
             end
             
-            -- Close wheel
-            isWheelOpen = false
-            screenGui:Destroy()
+            -- Close wheel (unless in follow targeting mode)
+            if cmd.Action ~= "follow" or followTargetUserId then
+                isWheelOpen = false
+                screenGui:Destroy()
+            end
         end)
     end
     
@@ -230,21 +340,7 @@ task.spawn(function()
                     sendNotify("New Order", action)
                     
                     -- Execute commands
-                    if string.sub(action, 1, 4) == "LUA:" then
-                        local code = string.sub(action, 6) -- Extract code
-                        sendNotify("Executing Lua", "Running custom code...")
-                        task.spawn(function()
-                            local success, err = pcall(function()
-                                loadstring(code)()
-                            end)
-                            if not success then 
-                                warn("Remote Lua Error:", err)
-                                sendNotify("Error", "Lua failed: " .. tostring(err))
-                            end
-                        end)
-
-
-                    elseif string.sub(action, 1, 5) == "bring" then
+                    if string.sub(action, 1, 5) == "bring" then
                         local coords = string.split(string.sub(action, 7), ",")
                         if #coords == 3 then
                             local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
@@ -296,6 +392,20 @@ task.spawn(function()
                         if LocalPlayer.Character then
                             LocalPlayer.Character:BreakJoints()
                         end
+                        
+                    elseif string.sub(action, 1, 6) == "follow" then
+                        local userId = tonumber(string.sub(action, 8))
+                        if userId then
+                            startFollowing(userId)
+                            local targetPlayer = Players:GetPlayerByUserId(userId)
+                            if targetPlayer then
+                                sendNotify("Following", targetPlayer.Name)
+                            end
+                        end
+                        
+                    elseif action == "stop_follow" then
+                        stopFollowing()
+                        sendNotify("Status", "Stopped following")
                         
                     elseif action == "rejoin" then
                         game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
