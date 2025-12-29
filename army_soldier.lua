@@ -19,14 +19,14 @@ local connections = {}
 
 -- Command definitions
 local COMMANDS = {
-    {Name = "Move", Icon = "🚶", Action = "move"},
-    {Name = "Jump", Icon = "⬆", Action = "jump"},
-    {Name = "Dance", Icon = "💃", Action = "dance"},
-    {Name = "Sit", Icon = "🪑", Action = "sit"},
-    {Name = "Wave", Icon = "👋", Action = "wave"},
-    {Name = "Follow", Icon = "👥", Action = "follow"},
-    {Name = "Stop", Icon = "🛑", Action = "stop"},
-    {Name = "Rejoin", Icon = "🔄", Action = "rejoin"}
+    {Name = "Move", Icon = "GO", Action = "move"},
+    {Name = "Jump", Icon = "JMP", Action = "jump"},
+    {Name = "Dance", Icon = "DNC", Action = "dance"},
+    {Name = "Sit", Icon = "SIT", Action = "sit"},
+    {Name = "Wave", Icon = "WAV", Action = "wave"},
+    {Name = "Follow", Icon = "FLW", Action = "follow"},
+    {Name = "Stop", Icon = "STP", Action = "stop"},
+    {Name = "Rejoin", Icon = "RJN", Action = "rejoin"}
 }
 
 local wheelGui = nil
