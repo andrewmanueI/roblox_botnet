@@ -708,8 +708,7 @@ local function createPanel()
                 Text = "Scan Mobile Buttons",
                 Color = Color3.fromRGB(100, 255, 200),
                 Callback = function()
-                    -- Fix: infoDrawer is a table, not an Instance. Access .Container
-                    local container = infoDrawer.Container:FindFirstChild("Content")
+                    local container = infoDrawer:FindFirstChild("Content")
                     if not container then return end
                     
                     -- Clear previous results
@@ -745,11 +744,6 @@ local function createPanel()
                             (btn:IsA("TextButton") and btn.Text:sub(1,15) or "N/A")
                         )
                     end
-                    
-                    -- Refresh drawer size to show new content
-                    task.delay(0.1, function()
-                        infoDrawer.SetOpen(true)
-                    end)
                 end
             }
         }
