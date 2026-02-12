@@ -207,17 +207,14 @@ local function startGotoWalk(targetPos)
     stopGotoWalk()
     stopFollowing()
     
-    local char = LocalPlayer.Character
-    if char then
-        local humanoid = char:FindFirstChildOfClass("Humanoid")
-        if humanoid then
-            if humanoid.SeatPart then
-                humanoid.Sit = false
-                task.wait(0.1)
-            end
-            humanoid.WalkToPoint = targetPos
-        end
+    local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    local humanoid = char:WaitForChild("Humanoid")
+
+    if humanoid.SeatPart then
+        humanoid.Sit = false
+        task.wait(0.1)
     end
+    humanoid.WalkToPoint = targetPos
 end
 
 local function startFollowing(userId, mode)
@@ -943,7 +940,7 @@ while isRunning do
                     consecutiveNoChange = 0
                     currentPollRate = MIN_POLL_RATE
 
-                    if action ~= "wait" and not isCommander then
+                    if action ~= "wait" then
                         sendNotify("New Order", action)
 
                         local execResult, execError = pcall(function()
