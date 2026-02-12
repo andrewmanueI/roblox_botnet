@@ -5,7 +5,6 @@ local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TextChatService = game:GetService("TextChatService")
 
 -- Forward declarations
 local highlightPlayers, clearHighlights, startFollowing, stopFollowing, startFollowingPosition, stopFollowingPosition
@@ -100,27 +99,6 @@ local function sendCommand(cmd)
             pcall(function() game:HttpPost(SERVER_URL, cmd) end)
         end
     end)
-end
-
-local function chatMessage(str)
-    str = tostring(str)
-    if TextChatService then
-        local generalChannel = TextChatService:FindFirstChild("TextChannels") and TextChatService.TextChannels:FindFirstChild("RBXGeneral")
-        if generalChannel then
-            pcall(function()
-                generalChannel:SendAsync(str)
-            end)
-        end
-    end
-    -- Fallback to legacy chat
-    local defaultChat = ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
-    if defaultChat then
-        local sayEvent = defaultChat:FindFirstChild("SayMessageRequest")
-        if sayEvent then
-            pcall(function()
-                sayEvent:FireServer(str, "All")
-            end)
-    end
 end
 
 local function registerClient()
@@ -295,17 +273,13 @@ local function startGotoWalk(targetPos)
             -- Autojump - check if obstacle ahead (only if enabled)
             local charHRP = char:FindFirstChild("HumanoidRootPart")
             if autoJumpEnabled and charHRP and humanoid.Jump then
-                local rayParams = RaycastParams.new()
-                rayParams.FilterDescendantsInstances = {char}
-                rayParams.FilterType = Enum.RaycastFilterType.Exclude
-
-                local check1 = workspace:Raycast(
-                    charHRP.Position - Vector3.new(0, 1.5, 0), charHRP.CFrame.LookVector * 3,
-                    rayParams
+                local check1 = workspace:FindPartOnRay(
+                    Ray.new(charHRP.Position - Vector3.new(0, 1.5, 0), charHRP.CFrame.LookVector * 3),
+                    char
                 )
-                local check2 = workspace:Raycast(
-                    charHRP.Position + Vector3.new(0, 1.5, 0), charHRP.CFrame.LookVector * 3,
-                    rayParams
+                local check2 = workspace:FindPartOnRay(
+                    Ray.new(charHRP.Position + Vector3.new(0, 1.5, 0), charHRP.CFrame.LookVector * 3),
+                    char
                 )
                 if check1 or check2 then
                     humanoid.Jump = true
@@ -992,79 +966,7 @@ local function createPanel()
             }
         }
     })
-
-    -- Chat Drawer
-    local chatDrawer = createDrawer({
-        Title = "Chat",
-        Description = "Broadcast message to army",
-        Icon = "💬",
-        Color = Color3.fromRGB(150, 150, 255),
-        Buttons = {
-            {
-                Text = "Quick: Roger!",
-                Color = Color3.fromRGB(100, 200, 255),
-                Callback = function()
-                    sendCommand("chat Roger!")
-                    chatMessage("Roger!")
-                    sendNotify("Chat", "Sent: Roger!")
-                end
-            },
-            {
-                Text = "Quick: Affirmative",
-                Color = Color3.fromRGB(100, 200, 255),
-                Callback = function()
-                    sendCommand("chat Affirmative!")
-                    chatMessage("Affirmative!")
-                    sendNotify("Chat", "Sent: Affirmative!")
-                end
-            },
-            {
-                Text = "Quick: Moving",
-                Color = Color3.fromRGB(100, 200, 255),
-                Callback = function()
-                    sendCommand("chat Moving to position!")
-                    chatMessage("Moving to position!")
-                    sendNotify("Chat", "Sent: Moving to position!")
-                end
-            },
-            {
-                Text = "Custom Message",
-                Color = Color3.fromRGB(150, 255, 150),
-                Callback = function()
-                    sendNotify("Chat", "Type in console then press Enter")
-                    local input = ""
-                    local connection = UserInputService.InputBegan:Connect(function(input, processed)
-                        if processed then return end
-                        if input.KeyCode == Enum.KeyCode.Return then
-                            if input ~= "" then
-                                sendCommand("chat " .. input)
-                                chatMessage(input)
-                                sendNotify("Chat", "Sent: " .. input)
-                            end
-                            connection:Disconnect()
-                        elseif input.KeyCode == Enum.KeyCode.Escape then
-                            connection:Disconnect()
-                        elseif input.KeyCode == Enum.KeyCode.Backquote then
-                            connection:Disconnect()
-                        elseif input.UserInputType == Enum.UserInputType.Keyboard then
-                            local keyCode = input.KeyCode.Name
-                            if #keyCode == 1 then
-                                input = input .. keyCode:lower()
-                            elseif keyCode == "Backspace" then
-                                input = string.sub(input, 1, -2)
-                            elseif keyCode == "Space" then
-                                input = input .. " "
-                            elseif keyCode == "Quote" or keyCode == "Apostrophe" then
-                                -- Handle quotes
-                                input = input .. keyCode
-                            end
-                        end
-                    end)
-                end
-            }
-        }
-    })
-
+    
     -- Initial State: Hidden
     panel.Position = UDim2.new(1, 0, 0.5, -240)
     screenGui.Parent = LocalPlayer.PlayerGui
@@ -1255,10 +1157,6 @@ while isRunning do
                                 if #coords == 3 then
                                     fireVoodoo(Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3])))
                                 end
-                            elseif string.sub(action, 1, 5) == "chat " then
-                                local msg = string.sub(action, 6)
-                                chatMessage(msg)
-                            end
                             end
                         end)
                         acknowledgeCommand(commandId, execResult, execError)
