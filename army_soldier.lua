@@ -207,14 +207,19 @@ local function startGotoWalk(targetPos)
     stopGotoWalk()
     stopFollowing()
     
-    local char = game.Players.LocalPlayer.Character or game.Players.LocalPlayer.CharacterAdded:Wait()
+    -- Redefine everything fresh inside the function
+    local Players = game:GetService("Players")
+    local LocalPlayer = Players.LocalPlayer
+    local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
     local humanoid = char:WaitForChild("Humanoid")
 
     if humanoid.SeatPart then
         humanoid.Sit = false
         task.wait(0.1)
     end
+    
     humanoid.WalkToPoint = targetPos
+    print("[GOTO] Executed WalkToPoint for: " .. tostring(targetPos))
 end
 
 local function startFollowing(userId, mode)
