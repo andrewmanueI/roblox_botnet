@@ -207,9 +207,6 @@ local function startGotoWalk(targetPos)
     stopGotoWalk()
     stopFollowing()
     
-    -- Redefine everything fresh inside the function
-    local Players = game:GetService("Players")
-    local LocalPlayer = Players.LocalPlayer
     local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
     local humanoid = char:WaitForChild("Humanoid")
 
@@ -218,8 +215,25 @@ local function startGotoWalk(targetPos)
         task.wait(0.1)
     end
     
-    humanoid.WalkToPoint = targetPos
-    print("[GOTO] Executed WalkToPoint for: " .. tostring(targetPos))
+    local speed = 2 -- Upgraded speed
+    
+    gotoConnection = RunService.Heartbeat:Connect(function(delta)
+        local myChar = LocalPlayer.Character
+        local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+        if not myRoot then return end
+
+        local dist = (targetPos - myRoot.Position).Magnitude
+        if dist < 1.5 then
+            stopGotoWalk()
+            return
+        end
+
+        local direction = (targetPos - myRoot.Position).Unit
+        -- Rotate to face destination
+        myRoot.CFrame = CFrame.new(myRoot.Position, Vector3.new(targetPos.X, myRoot.Position.Y, targetPos.Z))
+        -- Inch towards target
+        myChar:TranslateBy(direction * speed * delta * 10)
+    end)
 end
 
 local function startFollowing(userId, mode)
