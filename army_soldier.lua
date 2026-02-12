@@ -1152,12 +1152,12 @@ task.spawn(function()
 
                         -- Send acknowledgment
                         acknowledgeCommand(commandId, executionSuccess, executionError)
+                    end
                 end
-            end
             end
         end
     end
-end)
+end
 
 sendNotify("Army Script", "Press G to toggle Panel | F3 to Exit")
 print("Army Soldier loaded - Press G for panel")
