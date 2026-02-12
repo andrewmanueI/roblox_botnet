@@ -655,12 +655,7 @@ local function createPanel()
                         end
                     end)
                     
-                    task.delay(10, function()
-                        if clickConnection then
-                            clickConnection:Disconnect()
-                            sendNotify("Goto Mode", "Cancelled")
-                        end
-                    end)
+                    -- Timeout removed per user request
                 end
             },
             {
@@ -680,12 +675,7 @@ local function createPanel()
                         end
                     end)
                     
-                    task.delay(10, function()
-                        if clickConnection then
-                            clickConnection:Disconnect()
-                            sendNotify("Force Goto", "Cancelled")
-                        end
-                    end)
+                    -- Timeout removed per user request
                 end
             }
         }
@@ -797,13 +787,7 @@ local function createPanel()
                         end
                     end)
                     
-                    task.delay(10, function()
-                        if clickConnection then
-                            clickConnection:Disconnect()
-                            clearHighlights(highlights)
-                            sendNotify("Follow Mode", "Cancelled")
-                        end
-                    end)
+                    -- Timeout removed per user request
                 end
             },
             {
