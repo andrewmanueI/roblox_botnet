@@ -942,9 +942,6 @@ end
 -- Polling loop
 task.spawn(function()
     while isRunning do
-        -- Use adaptive polling rate
-        task.wait(currentPollRate)
-
         -- Send periodic heartbeat
         if clientId and os.time() - lastHeartbeat >= HEARTBEAT_INTERVAL then
             sendHeartbeat()
@@ -983,11 +980,9 @@ task.spawn(function()
                 if consecutiveNoChange > 10 then
                     currentPollRate = math.min(MAX_POLL_RATE, currentPollRate + 0.1)
                 end
+                -- Wait and continue to next iteration
                 task.wait(currentPollRate)
-                continue
-            end
-
-            if response.StatusCode == 200 then
+            elseif response.StatusCode == 200 then
                 -- Update ETag from response headers if available
                 if response.Headers and response.Headers["ETag"] then
                     lastETag = response.Headers["ETag"]
