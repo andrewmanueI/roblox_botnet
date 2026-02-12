@@ -3,6 +3,7 @@ local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 -- Forward declarations
 local highlightPlayers, clearHighlights, startFollowing, stopFollowing
@@ -17,13 +18,22 @@ local lastCommandId = 0
 local isRunning = true
 local isCommander = false
 local connections = {}
+local clientId = nil
+local executedCommands = {} -- Map of commandId -> executed (boolean)
+local lastHeartbeat = 0
+local HEARTBEAT_INTERVAL = 15 -- seconds
+local lastETag = nil
+local MIN_POLL_RATE = 0.2
+local MAX_POLL_RATE = 2.0
+local currentPollRate = POLL_RATE
+local consecutiveNoChange = 0
 
 local panelGui = nil
 local isPanelOpen = false
 local followConnection = nil
 local followTargetUserId = nil
 local isClicking = false
-local followMode = "Normal" -- Normal, Line, Circle
+local followMode = "Normal" -- Normal, Line, Circle, Force
 local movementMode = "Normal" -- Normal, TP-Walk
 local tpWalkConnection = nil
 local moveTarget = nil
@@ -63,11 +73,13 @@ end
 
 -- Helper functions must be defined before createPanel
 local function sendNotify(title, text)
-    game:GetService("StarterGui"):SetCore("SendNotification", {
-        Title = title,
-        Text = text,
-        Duration = 3
-    })
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = title,
+            Text = text,
+            Duration = 3
+        })
+    end)
 end
 
 local function sendCommand(cmd)
@@ -84,6 +96,82 @@ local function sendCommand(cmd)
             pcall(function() game:HttpPost(SERVER_URL, cmd) end)
         end
     end)
+end
+
+local function registerClient()
+    local request = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
+    if not request then return false end
+
+    local success, response = pcall(function()
+        return request({
+            Url = SERVER_URL .. "/register",
+            Method = "POST",
+            Body = "",
+            Headers = { ["Content-Type"] = "application/json" }
+        })
+    end)
+
+    if success and response and response.Body then
+        local jsonSuccess, data = pcall(function()
+            return HttpService:JSONDecode(response.Body)
+        end)
+
+        if jsonSuccess and data.clientId then
+            clientId = data.clientId
+            sendNotify("System", "Registered as " .. string.sub(clientId, 1, 12) .. "...")
+            print("[ARMY] Registered as " .. clientId)
+            return true
+        end
+    end
+
+    return false
+end
+
+local function sendHeartbeat()
+    if not clientId then return false end
+
+    local request = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
+    if not request then return false end
+
+    local success = pcall(function()
+        request({
+            Url = SERVER_URL .. "/heartbeat",
+            Method = "POST",
+            Body = HttpService:JSONEncode({ clientId = clientId }),
+            Headers = { ["Content-Type"] = "application/json" }
+        })
+    end)
+
+    return success
+end
+
+local function acknowledgeCommand(commandId, success, errorMsg)
+    if not clientId then return false end
+
+    local request = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
+    if not request then return false end
+
+    local payload = HttpService:JSONEncode({
+        clientId = clientId,
+        commandId = commandId,
+        success = success or true,
+        error = errorMsg or nil
+    })
+
+    local ackSuccess = pcall(function()
+        request({
+            Url = SERVER_URL .. "/acknowledge",
+            Method = "POST",
+            Body = payload,
+            Headers = { ["Content-Type"] = "application/json" }
+        })
+    end)
+
+    if ackSuccess then
+        executedCommands[commandId] = true
+    end
+
+    return ackSuccess
 end
 
 local function highlightPlayers()
@@ -146,19 +234,45 @@ local function startTPWalk(targetPos)
     end)
 end
 
-local function startFollowing(userId)
+local function startFollowing(userId, mode)
     if followConnection then
         followConnection:Disconnect()
     end
     
     followTargetUserId = userId
+    local followStyle = mode or "Normal"
     
     followConnection = RunService.Heartbeat:Connect(function()
         local targetPlayer = Players:GetPlayerByUserId(userId)
         if targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
             if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
-                local targetPos = targetPlayer.Character.HumanoidRootPart.Position
-                LocalPlayer.Character.Humanoid:MoveTo(targetPos)
+                local targetHRP = targetPlayer.Character.HumanoidRootPart
+                local targetPos = targetHRP.Position
+                
+                if followStyle == "Line" then
+                    local index = (LocalPlayer.UserId % 10) + 1
+                    local spacing = 4
+                    local offset = targetHRP.CFrame.LookVector * -1 * (index * spacing + 5)
+                    targetPos = targetPos + offset
+                elseif followStyle == "Circle" then
+                    local angle = math.rad((os.time() * 50 + LocalPlayer.UserId) % 360)
+                    local radius = 15
+                    local offset = Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
+                    targetPos = targetPos + offset
+                else
+                    targetPos = targetPos + Vector3.new(math.random(-2,2), 0, math.random(-2,2))
+                end
+                
+                if followStyle == "Force" then
+                    local hrp = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                    if hrp then
+                        local tweenInfo = TweenInfo.new(0.1, Enum.EasingStyle.Linear)
+                        TweenService:Create(hrp, tweenInfo, {CFrame = CFrame.new(targetPos)}):Play()
+                        hrp.Velocity = Vector3.new(0,0,0)
+                    end
+                else
+                    LocalPlayer.Character.Humanoid:MoveTo(targetPos)
+                end
             end
         end
     end)
@@ -671,34 +785,6 @@ local function createPanel()
                             if character then
                                 local player = Players:GetPlayerFromCharacter(character)
                                 if player and player ~= LocalPlayer then
-                                    local followCmd = string.format("follow %d", player.UserId)
-                                    -- Wait, strictly speaking I should update the server to understand modes?
-                                    -- Or does 'follow' command on server handle it?
-                                    -- The user asked for "selector where i can pick what type of following we're going to do".
-                                    -- This implies the soldiers behave differently.
-                                    -- THIS REQUIRES SERVER SIDE (or client side simulation if local).
-                                    -- Since `army_soldier.lua` is client side for the controller, but the soldiers run it too?
-                                    -- Wait, `army_soldier.lua` IS the script running on the soldiers?
-                                    -- If this script runs on soldiers, then I need to update the polling loop to respect `followMode`!
-                                    
-                                    -- Yes, `army_soldier.lua` runs on all bots.
-                                    -- So `followMode` variable is local to EACH bot if they run this GUI?
-                                    -- NO. This GUI is for the COMMANDER.
-                                    -- The bots don't see the GUI. 
-                                    -- So when I send "follow", I should send the MODE too?
-                                    -- "follow <userid> <mode>"?
-                                    -- Or standard "follow <userid>" and the bots default to normal?
-                                    
-                                    -- The user said "selector where I can pick".
-                                    -- If I am the commander, I pick the mode.
-                                    -- I need to broadcast this mode to the soldiers.
-                                    -- The current protocol is `sendCommand(cmd)`.
-                                    -- I should probably change the command to `follow <userid> <mode>`.
-                                    
-                                    -- Start with standard follow for now, but I'll update the command string if needed.
-                                    -- Let's append the mode to the command if the server script supports it?
-                                    -- Or better: update the command handler loop in THIS script (since solders run it too) to parse the mode.
-                                    
                                     local modeCmd = followMode or "Normal"
                                     local fullCmd = string.format("follow %d %s", player.UserId, modeCmd)
                                     sendCommand(fullCmd)
@@ -798,310 +884,6 @@ local function createPanel()
     return screenGui
 end
 
-local followConnection = nil
-local followTargetUserId = nil
-
--- Follow helper functions
-local function highlightPlayers()
-    local highlights = {}
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
-            local highlight = Instance.new("Highlight")
-            highlight.FillColor = Color3.fromRGB(255, 255, 0)
-            highlight.OutlineColor = Color3.fromRGB(255, 200, 0)
-            highlight.FillTransparency = 0.5
-            highlight.OutlineTransparency = 0
-            highlight.Parent = player.Character
-            table.insert(highlights, highlight)
-        end
-    end
-    return highlights
-end
-
-local function clearHighlights(highlights)
-    for _, h in ipairs(highlights) do
-        if h then h:Destroy() end
-    end
-end
-
-local function startFollowing(userId, mode)
-    if followConnection then
-        followConnection:Disconnect()
-    end
-    
-    followTargetUserId = userId
-    local mode = mode or "Normal"
-    
-    followConnection = RunService.Heartbeat:Connect(function()
-        local targetPlayer = Players:GetPlayerByUserId(userId)
-        if targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
-            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
-                local targetHRP = targetPlayer.Character.HumanoidRootPart
-                local targetPos = targetHRP.Position
-                
-                if mode == "Line" then
-                     -- Form a line behind the leader
-                     -- Use UserId to determine position in line (pseudo-random but consistent)
-                     local index = (LocalPlayer.UserId % 10) + 1
-                     local spacing = 4
-                     local offset = targetHRP.CFrame.LookVector * -1 * (index * spacing + 5)
-                     targetPos = targetPos + offset
-                     
-                elseif mode == "Circle" then
-                    -- Form a circle around the leader
-                    local angle = math.rad((os.time() * 50 + LocalPlayer.UserId) % 360)
-                    local radius = 15
-                    local offset = Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
-                    targetPos = targetPos + offset
-                else
-                    -- Normal: Just randomize slightly to prevent perfect stacking
-                    targetPos = targetPos + Vector3.new(math.random(-2,2), 0, math.random(-2,2))
-                end
-                
-                if mode == "Force" then
-                    -- Force uses tweening for absolute locking
-                    local hrp = LocalPlayer.Character.HumanoidRootPart
-                    local tweenInfo = TweenInfo.new(0.1, Enum.EasingStyle.Linear)
-                    TweenService:Create(hrp, tweenInfo, {CFrame = CFrame.new(targetPos)}):Play()
-                    
-                    -- Disable physics/gravity interference
-                    hrp.Velocity = Vector3.new(0,0,0)
-                else
-                    LocalPlayer.Character.Humanoid:MoveTo(targetPos)
-                end
-            end
-        end
-    end)
-end
-
-
-local function stopFollowing()
-    if followConnection then
-        followConnection:Disconnect()
-        followConnection = nil
-    end
-    followTargetUserId = nil
-end
-
-local function sendNotify(title, text)
-    game:GetService("StarterGui"):SetCore("SendNotification", {
-        Title = title,
-        Text = text,
-        Duration = 3
-    })
-end
-
-local function terminateScript()
-    isRunning = false
-    sendNotify("Army Script", "Script Terminated")
-    for _, conn in ipairs(connections) do
-        if conn then conn:Disconnect() end
-    end
-    if wheelGui then wheelGui:Destroy() end
-    stopFollowing()
-end
-
-local function sendCommand(cmd)
-    task.spawn(function()
-        local request = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
-        if request then
-            request({
-                Url = SERVER_URL,
-                Method = "POST",
-                Body = cmd,
-                Headers = { ["Content-Type"] = "text/plain" }
-            })
-        else
-            pcall(function() game:HttpPost(SERVER_URL, cmd) end)
-        end
-    end)
-end
-
--- Create GTA 5 Style Wheel
-local function createWheel()
-    local screenGui = Instance.new("ScreenGui")
-    screenGui.Name = "ArmyWheel"
-    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    screenGui.ResetOnSpawn = false
-    
-    -- Background blur/dim
-    local dimFrame = Instance.new("Frame", screenGui)
-    dimFrame.Size = UDim2.new(1, 0, 1, 0)
-    dimFrame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-    dimFrame.BackgroundTransparency = 0.5
-    dimFrame.BorderSizePixel = 0
-    
-    -- Main wheel container
-    local wheelFrame = Instance.new("Frame", screenGui)
-    wheelFrame.Size = UDim2.new(0, 400, 0, 400)
-    wheelFrame.Position = UDim2.new(0.5, -200, 0.5, -200)
-    wheelFrame.BackgroundTransparency = 1
-    
-    -- Center circle (info display)
-    local centerCircle = Instance.new("Frame", wheelFrame)
-    centerCircle.Size = UDim2.new(0, 180, 0, 180)
-    centerCircle.Position = UDim2.new(0.5, -90, 0.5, -90)
-    centerCircle.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-    centerCircle.BorderSizePixel = 0
-    
-    local centerCorner = Instance.new("UICorner", centerCircle)
-    centerCorner.CornerRadius = UDim.new(1, 0)
-    
-    local centerStroke = Instance.new("UIStroke", centerCircle)
-    centerStroke.Color = Color3.fromRGB(200, 200, 200)
-    centerStroke.Thickness = 2
-    
-    local centerLabel = Instance.new("TextLabel", centerCircle)
-    centerLabel.Size = UDim2.new(1, 0, 1, 0)
-    centerLabel.BackgroundTransparency = 1
-    centerLabel.Text = "Select Command"
-    centerLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-    centerLabel.TextSize = 18
-    centerLabel.Font = Enum.Font.GothamBold
-    centerLabel.TextWrapped = true
-    
-    -- Create segments
-    local numSegments = #COMMANDS
-    local anglePerSegment = 360 / numSegments
-    
-    for i, cmd in ipairs(COMMANDS) do
-        local angle = math.rad((i - 1) * anglePerSegment - 90) -- Start from top
-        local radius = 150
-        
-        -- Segment button
-        local segment = Instance.new("TextButton", wheelFrame)
-        segment.Size = UDim2.new(0, 80, 0, 80)
-        segment.Position = UDim2.new(0.5, math.cos(angle) * radius - 40, 0.5, math.sin(angle) * radius - 40)
-        segment.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
-        segment.BorderSizePixel = 0
-        segment.Text = ""
-        segment.AutoButtonColor = false
-        
-        local segCorner = Instance.new("UICorner", segment)
-        segCorner.CornerRadius = UDim.new(0.2, 0)
-        
-        local segStroke = Instance.new("UIStroke", segment)
-        segStroke.Color = Color3.fromRGB(150, 150, 150)
-        segStroke.Thickness = 2
-        
-        -- Icon/Label
-        local label = Instance.new("TextLabel", segment)
-        label.Size = UDim2.new(1, 0, 0.6, 0)
-        label.Position = UDim2.new(0, 0, 0, 0)
-        label.BackgroundTransparency = 1
-        label.Text = cmd.Icon
-        label.TextSize = 32
-        label.TextColor3 = Color3.fromRGB(255, 255, 255)
-        
-        local nameLabel = Instance.new("TextLabel", segment)
-        nameLabel.Size = UDim2.new(1, 0, 0.4, 0)
-        nameLabel.Position = UDim2.new(0, 0, 0.6, 0)
-        nameLabel.BackgroundTransparency = 1
-        -- Dynamic text for Follow button
-        if cmd.Action == "follow" then
-            nameLabel.Text = followTargetUserId and "Stop Follow" or "Follow"
-        else
-            nameLabel.Text = cmd.Name
-        end
-        nameLabel.TextSize = 12
-        nameLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
-        nameLabel.Font = Enum.Font.Gotham
-        
-        -- Hover effect
-        segment.MouseEnter:Connect(function()
-            segment.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
-            centerLabel.Text = cmd.Name
-            TweenService:Create(segment, TweenInfo.new(0.1), {Size = UDim2.new(0, 90, 0, 90)}):Play()
-        end)
-        
-        segment.MouseLeave:Connect(function()
-            segment.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
-            TweenService:Create(segment, TweenInfo.new(0.1), {Size = UDim2.new(0, 80, 0, 80)}):Play()
-        end)
-        
-        -- Click handler
-        segment.MouseButton1Click:Connect(function()
-            if cmd.Action == "bring" then
-                -- Send commander's position
-                if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
-                    local pos = LocalPlayer.Character.HumanoidRootPart.Position
-                    local bringCmd = string.format("bring %.2f,%.2f,%.2f", pos.X, pos.Y, pos.Z)
-                    sendCommand(bringCmd)
-                    sendNotify("Command", "Bringing soldiers to you...")
-                end
-                
-            elseif cmd.Action == "follow" then
-                -- Toggle follow mode
-                if followTargetUserId then
-                    -- Stop following
-                    sendCommand("stop_follow")
-                    stopFollowing()
-                    sendNotify("Command", "Stopped following")
-                else
-                    -- Enter targeting mode
-                    sendNotify("Follow Mode", "Click on a player to follow")
-                    local highlights = highlightPlayers()
-                    
-                    -- Wait for click on a player
-                    local clickConnection
-                    clickConnection = Mouse.Button1Down:Connect(function()
-                        local target = Mouse.Target
-                        if target then
-                            local character = target:FindFirstAncestorOfClass("Model")
-                            if character then
-                                local player = Players:GetPlayerFromCharacter(character)
-                                if player and player ~= LocalPlayer then
-                                    -- Found valid target
-                                    local followCmd = string.format("follow %d", player.UserId)
-                                    sendCommand(followCmd)
-                                    sendNotify("Following", player.Name)
-                                    
-                                    -- Start following locally too
-                                    startFollowing(player.UserId)
-                                    
-                                    clearHighlights(highlights)
-                                    clickConnection:Disconnect()
-                                    
-                                    -- Close wheel on success
-                                    isWheelOpen = false
-                                    if wheelGui then wheelGui:Destroy() end
-                                end
-                            end
-                        end
-                    end)
-                    
-                    -- Auto-cancel after 10 seconds
-                    task.delay(10, function()
-                        if clickConnection then
-                            clickConnection:Disconnect()
-                            clearHighlights(highlights)
-                            sendNotify("Follow Mode", "Cancelled")
-                        end
-                    end)
-                end
-                
-            elseif cmd.Action == "join_commander" then
-                local joinCmd = string.format("join_server %s %s", tostring(game.PlaceId), game.JobId)
-                sendCommand(joinCmd)
-                sendNotify("Command", "Broadcasting Server Info...")
-            else
-                sendCommand(cmd.Action)
-                sendNotify("Command", cmd.Name .. " executed")
-            end
-            
-            -- Close wheel (unless in follow targeting mode)
-            if cmd.Action ~= "follow" or followTargetUserId then
-                isWheelOpen = false
-                screenGui:Destroy()
-            end
-        end)
-    end
-    
-    screenGui.Parent = LocalPlayer.PlayerGui
-    return screenGui
-end
-
-
 -- Panel toggle with slide animation
 table.insert(connections, UserInputService.InputBegan:Connect(function(input, processed)
     if processed then return end
@@ -1142,36 +924,109 @@ table.insert(connections, UserInputService.InputBegan:Connect(function(input, pr
 end))
 
 
+-- Register client before polling starts
+task.wait(1) -- Small delay to let server be ready
+local registered = false
+for i = 1, 5 do -- Try 5 times
+    if registerClient() then
+        registered = true
+        break
+    end
+    task.wait(1)
+end
+
+if not registered then
+    sendNotify("Warning", "Failed to register - running without ID")
+end
+
 -- Polling loop
 task.spawn(function()
     while isRunning do
-        task.wait(POLL_RATE)
-        
-        local success, response = pcall(function()
-            return game:HttpGet(SERVER_URL, true)
-        end)
-        
-        if success and isRunning then
-            local jsonSuccess, data = pcall(function()
-                return HttpService:JSONDecode(response)
+        -- Use adaptive polling rate
+        task.wait(currentPollRate)
+
+        -- Send periodic heartbeat
+        if clientId and os.time() - lastHeartbeat >= HEARTBEAT_INTERVAL then
+            sendHeartbeat()
+            lastHeartbeat = os.time()
+        end
+
+        -- Enhanced polling with ETag support
+        local request = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
+        local success, response
+
+        if request then
+            success, response = pcall(function()
+                local headers = {}
+                if lastETag then
+                    headers["If-None-Match"] = lastETag
+                end
+                return request({
+                    Url = SERVER_URL .. "/",
+                    Method = "GET",
+                    Headers = headers
+                })
             end)
-            
-            if jsonSuccess and data and data.id and data.id ~= lastCommandId then
-                lastCommandId = data.id 
-                local action = data.action
-                
-                if action ~= "wait" then
-                    -- If we are commander, don't execute commands (unless we want to test)
-                    if isCommander then
-                        -- Optional: Print only
-                        -- print("Commander ignored order: " .. action)
-                    else
-                        sendNotify("New Order", action)
-                        
-                        -- Execute commands
-                        if string.sub(action, 1, 5) == "bring" then
-                            stopFollowing() -- Stop follow to prevent conflict
-                            local coords = string.split(string.sub(action, 7), ",")
+        else
+            -- Fallback to game:HttpGet
+            success, response = pcall(function()
+                return { StatusCode = 200, Body = game:HttpGet(SERVER_URL, true) }
+            end)
+        end
+
+        if success and isRunning and response then
+            -- Handle 304 Not Modified
+            if response.StatusCode == 304 then
+                -- No new command, skip processing and adjust polling rate
+                consecutiveNoChange = consecutiveNoChange + 1
+                -- Slow down polling when no changes
+                if consecutiveNoChange > 10 then
+                    currentPollRate = math.min(MAX_POLL_RATE, currentPollRate + 0.1)
+                end
+                task.wait(currentPollRate)
+                continue
+            end
+
+            if response.StatusCode == 200 then
+                -- Update ETag from response headers if available
+                if response.Headers and response.Headers["ETag"] then
+                    lastETag = response.Headers["ETag"]
+                end
+
+                local jsonSuccess, data = pcall(function()
+                    return HttpService:JSONDecode(response.Body)
+                end)
+
+                if jsonSuccess and data and data.id and data.id ~= lastCommandId then
+                    local commandId = data.id
+
+                    -- Check if already executed
+                    if executedCommands[commandId] then
+                        return -- Already executed this command
+                    end
+
+                    lastCommandId = commandId
+                    local action = data.action
+                    local executionSuccess = true
+                    local executionError = nil
+
+                    -- Reset polling rate when we get a new command
+                    consecutiveNoChange = 0
+                    currentPollRate = MIN_POLL_RATE
+
+                    if action ~= "wait" then
+                        -- If we are commander, don't execute commands (unless we want to test)
+                        if isCommander then
+                            -- Optional: Print only
+                            -- print("Commander ignored order: " .. action)
+                        else
+                            sendNotify("New Order", action)
+
+                            -- Execute commands with error tracking
+                            local execResult, execError = pcall(function()
+                                if string.sub(action, 1, 5) == "bring" then
+                                    stopFollowing() -- Stop follow to prevent conflict
+                                    local coords = string.split(string.sub(action, 7), ",")
                             if #coords == 3 then
                                 local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
                                 if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
@@ -1294,6 +1149,14 @@ task.spawn(function()
                                 print("Army: Casted Voodoo at " .. tostring(targetPos))
                             end
                         end
+                        end) -- End of pcall for command execution
+
+                        -- Track execution result
+                        executionSuccess = execResult
+                        executionError = execError
+
+                        -- Send acknowledgment
+                        acknowledgeCommand(commandId, executionSuccess, executionError)
                 end
             end
             end
