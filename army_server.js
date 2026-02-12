@@ -1,6 +1,6 @@
 ﻿const http = require('http');
 
-const IMPULSES = new Set(["rejoin", "reset", "reload", "goto", "follow", "follow_pos", "jump", "bring", "voodoo", "join_server", "stop_follow", "set_autojump"]);
+const IMPULSES = new Set(["rejoin", "reset", "reload", "goto", "follow", "follow_pos", "jump", "bring", "voodoo", "join_server", "stop_follow", "set_autojump", "chat"]);
 const BODY_LIMIT_BYTES = 8 * 1024;
 
 let commandSeq = 0;
