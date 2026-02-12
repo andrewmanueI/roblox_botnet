@@ -11,7 +11,7 @@ local getVisibleButtons
 local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
 
-local SERVER_URL = "http://157.20.32.201:5555"
+local SERVER_URL = "http://157.15.40.37:5555"
 local RELOAD_URL = "https://raw.githubusercontent.com/andrewmanueI/roblox_botnet/master/army_soldier.lua"
 local POLL_RATE = 0.5
 local lastCommandId = 0
@@ -41,6 +41,21 @@ local function toggleClicking(state)
             end
         end)
     end
+end
+
+-- Voodoo ByteNet logic
+local function fireVoodoo(targetPos)
+    local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
+    if not ByteNetRemote then return end
+    
+    local b = buffer.create(14)
+    buffer.writeu8(b, 0, 0)   -- Namespace 0
+    buffer.writeu8(b, 1, 10)  -- Packet ID 10
+    buffer.writef32(b, 2, targetPos.X)
+    buffer.writef32(b, 6, targetPos.Y)
+    buffer.writef32(b, 10, targetPos.Z)
+    
+    ByteNetRemote:FireServer(b)
 end
 
 -- Helper functions must be defined before createPanel
@@ -558,6 +573,18 @@ local function createPanel()
                 Callback = function()
                     toggleClicking(false)
                     sendNotify("Actions", "Autoclicker Stopped")
+                end
+            },
+            {
+                Text = "Army Voodoo",
+                Color = Color3.fromRGB(200, 100, 255),
+                Callback = function()
+                    if Mouse.Hit then
+                        local pos = Mouse.Hit.Position
+                        local voodooCmd = string.format("voodoo %.2f,%.2f,%.2f", pos.X, pos.Y, pos.Z)
+                        sendCommand(voodooCmd)
+                        sendNotify("Voodoo", "All soldiers casting at target!")
+                    end
                 end
             }
         }
@@ -1255,6 +1282,14 @@ task.spawn(function()
                             
                         elseif action == "rejoin" then
                             game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
+                            
+                        elseif string.sub(action, 1, 6) == "voodoo" then
+                            local coords = string.split(string.sub(action, 8), ",")
+                            if #coords == 3 then
+                                local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
+                                fireVoodoo(targetPos)
+                                print("Army: Casted Voodoo at " .. tostring(targetPos))
+                            end
                         end
                 end
             end
