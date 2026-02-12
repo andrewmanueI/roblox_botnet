@@ -1026,7 +1026,7 @@ task.spawn(function()
                             local execResult, execError = pcall(function()
                                 if string.sub(action, 1, 5) == "bring" then
                                     stopFollowing() -- Stop follow to prevent conflict
-                                    local coords = string.split(string.sub(action, 7), ",")
+                                    local coords = string.split(string.sub(action, 8), ",")
                             if #coords == 3 then
                                 local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
                                 if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
@@ -1063,7 +1063,7 @@ task.spawn(function()
                         elseif string.sub(action, 1, 4) == "goto" then
                             if not isCommander then
                                 stopFollowing() -- Stop follow to prevent conflict
-                                local coords = string.split(string.sub(action, 6), ",")
+                                local coords = string.split(string.sub(action, 7), ",")
                                 if #coords == 3 then
                                     local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
                                     if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
