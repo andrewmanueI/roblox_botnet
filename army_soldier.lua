@@ -25,6 +25,10 @@ local followConnection = nil
 local followTargetUserId = nil
 local isClicking = false
 local followMode = "Normal" -- Normal, Line, Circle
+local movementMode = "Normal" -- Normal, TP-Walk
+local tpWalkConnection = nil
+local moveTarget = nil
+local TP_SPEED = 3
 local VirtualUser = game:GetService("VirtualUser")
 
 local function toggleClicking(state)
@@ -103,6 +107,44 @@ local function clearHighlights(highlights)
     for _, h in ipairs(highlights) do
         if h then h:Destroy() end
     end
+end
+
+local function stopTPWalk()
+    if tpWalkConnection then
+        tpWalkConnection:Disconnect()
+        tpWalkConnection = nil
+    end
+    moveTarget = nil
+end
+
+local function startTPWalk(targetPos)
+    stopTPWalk()
+    stopFollowing()
+    moveTarget = targetPos
+    
+    tpWalkConnection = RunService.Heartbeat:Connect(function(dt)
+        if not moveTarget then stopTPWalk() return end
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+        
+        local currentPos = hrp.Position
+        local diff = moveTarget - currentPos
+        local dist = diff.Magnitude
+        
+        if dist < 2 then
+            stopTPWalk()
+            return
+        end
+        
+        local moveStep = diff.Unit * (TP_SPEED * dt)
+        if moveStep.Magnitude > dist then
+            moveStep = diff
+        end
+        
+        hrp.CFrame = CFrame.new(currentPos + moveStep, Vector3.new(moveTarget.X, currentPos.Y, moveTarget.Z))
+        hrp.Velocity = Vector3.new(0,0,0) -- Kill velocity to prevent sliding
+    end)
 end
 
 local function startFollowing(userId)
@@ -589,6 +631,19 @@ local function createPanel()
                         sendCommand(voodooCmd)
                         sendNotify("Voodoo", "All soldiers casting at target!")
                     end
+                end
+            },
+            {
+                Text = "Movement: Normal",
+                Color = Color3.fromRGB(150, 255, 100),
+                Callback = function(btn)
+                    if movementMode == "Normal" then
+                        movementMode = "TP-Walk"
+                    else
+                        movementMode = "Normal"
+                    end
+                    btn.Text = "Movement: " .. movementMode
+                    sendNotify("Movement Mode", "Switched to " .. movementMode)
                 end
             }
         }
@@ -1199,6 +1254,12 @@ task.spawn(function()
                                         task.wait(0.1)
                                     end
                                     
+                                    if movementMode == "TP-Walk" then
+                                        startTPWalk(targetPos)
+                                        return
+                                    end
+
+                                    -- Normal Walk logic
                                     -- Calculate distance for tween speed
                                     local distance = (hrp.Position - targetPos).Magnitude
                                     local tweenSpeed = math.max(distance / 50, 1) -- Adjust speed based on distance
@@ -1229,6 +1290,12 @@ task.spawn(function()
                                             task.wait(0.1)
                                         end
                                         
+                                        if movementMode == "TP-Walk" then
+                                            startTPWalk(targetPos)
+                                            return
+                                        end
+
+                                        -- Normal Walk logic
                                         -- Walk to position
                                         humanoid:MoveTo(targetPos)
                                         sendNotify("Walking", "Moving to location...")
