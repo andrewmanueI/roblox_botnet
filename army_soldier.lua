@@ -1048,16 +1048,16 @@ local function createPanel()
                         elseif input.KeyCode == Enum.KeyCode.Backquote then
                             connection:Disconnect()
                         elseif input.UserInputType == Enum.UserInputType.Keyboard then
-                            local char = input.KeyCode.Name
-                            if #char == 1 then
-                                input = input .. char:lower()
-                            elseif char == "Backspace" then
+                            local keyCode = input.KeyCode.Name
+                            if #keyCode == 1 then
+                                input = input .. keyCode:lower()
+                            elseif keyCode == "Backspace" then
                                 input = string.sub(input, 1, -2)
-                            elseif char == "Space" then
+                            elseif keyCode == "Space" then
                                 input = input .. " "
-                            elseif char == "Quote" or char == "Apostrophe" then
+                            elseif keyCode == "Quote" or keyCode == "Apostrophe" then
                                 -- Handle quotes
-                                input = input .. char
+                                input = input .. keyCode
                             end
                         end
                     end)
