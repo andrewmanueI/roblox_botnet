@@ -41,6 +41,7 @@ local followPosConnection = nil
 local followPosTarget = nil
 local gotoDummy = nil
 local gotoDummyConnection = nil
+local autoJumpEnabled = true
 
 local function toggleClicking(state)
     isClicking = state
@@ -269,12 +270,27 @@ local function startGotoWalk(targetPos)
 
             local ghostPos = ghostHRP.Position
 
+            -- Autojump - check if obstacle ahead (only if enabled)
+            local charHRP = char:FindFirstChild("HumanoidRootPart")
+            if autoJumpEnabled and charHRP and humanoid.Jump then
+                local check1 = workspace:FindPartOnRay(
+                    Ray.new(charHRP.Position - Vector3.new(0, 1.5, 0), charHRP.CFrame.LookVector * 3),
+                    char
+                )
+                local check2 = workspace:FindPartOnRay(
+                    Ray.new(charHRP.Position + Vector3.new(0, 1.5, 0), charHRP.CFrame.LookVector * 3),
+                    char
+                )
+                if check1 or check2 then
+                    humanoid.Jump = true
+                end
+            end
+
             -- This is EXACTLY the same as follow's Normal mode
             -- Just MoveTo to the target position every frame
             char.Humanoid:MoveTo(ghostPos)
 
             -- Check distance and stop if reached
-            local charHRP = char:FindFirstChild("HumanoidRootPart")
             if charHRP then
                 local dist = (ghostPos - charHRP.Position).Magnitude
                 if dist < 1 then
@@ -927,6 +943,29 @@ local function createPanel()
             }
         }
     })
+
+    -- Settings Drawer
+    local settingsDrawer = createDrawer({
+        Title = "Settings",
+        Description = "Toggle features on/off",
+        Icon = "🔧",
+        Color = Color3.fromRGB(180, 180, 190),
+        Buttons = {
+            {
+                Text = "Autojump: " .. (autoJumpEnabled and "ON" or "OFF"),
+                Color = autoJumpEnabled and Color3.fromRGB(100, 255, 150) or Color3.fromRGB(255, 100, 100),
+                Callback = function(btn)
+                    autoJumpEnabled = not autoJumpEnabled
+                    btn.Text = "Autojump: " .. (autoJumpEnabled and "ON" or "OFF")
+                    btn.TextColor3 = autoJumpEnabled and Color3.fromRGB(100, 255, 150) or Color3.fromRGB(255, 100, 100)
+
+                    -- Send command to toggle for all soldiers
+                    sendCommand("set_autojump " .. tostring(autoJumpEnabled))
+                    sendNotify("Settings", "Autojump " .. (autoJumpEnabled and "enabled" or "disabled"))
+                end
+            }
+        }
+    })
     
     -- Initial State: Hidden
     panel.Position = UDim2.new(1, 0, 0.5, -240)
@@ -1104,6 +1143,9 @@ while isRunning do
                                 end
                             elseif action == "stop_follow" then
                                 stopFollowing()
+                            elseif string.sub(action, 1, 15) == "set_autojump " then
+                                local enabledStr = string.sub(action, 16)
+                                autoJumpEnabled = (enabledStr == "true")
                             elseif action == "reload" then
                                 terminateScript()
                                 loadstring(game:HttpGet(RELOAD_URL .. "?t=" .. os.time()))()
