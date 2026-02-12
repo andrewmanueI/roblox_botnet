@@ -120,7 +120,6 @@ local function chatMessage(str)
             pcall(function()
                 sayEvent:FireServer(str, "All")
             end)
-        end
     end
 end
 
