@@ -641,7 +641,7 @@ local function createPanel()
                     local clickConnection
                     clickConnection = Mouse.Button1Down:Connect(function()
                         if Mouse.Hit then
-                            local targetPos = Mouse.Hit.Position
+                            local targetPos = Mouse.Hit.Position + Vector3.new(0, 3, 0)
                             local gotoCmd = string.format("goto %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
                             sendCommand(gotoCmd)
                             sendNotify("Goto", "Soldiers walking to location")
