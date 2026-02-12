@@ -105,9 +105,7 @@ local function registerClient()
     local success, response = pcall(function()
         return request({
             Url = SERVER_URL .. "/register",
-            Method = "POST",
-            Body = "",
-            Headers = { ["Content-Type"] = "application/json" }
+            Method = "GET"
         })
     end)
 
