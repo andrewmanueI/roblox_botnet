@@ -39,6 +39,8 @@ local moveTarget = nil
 local VirtualUser = game:GetService("VirtualUser")
 local followPosConnection = nil
 local followPosTarget = nil
+local gotoDummy = nil
+local gotoDummyConnection = nil
 
 local function toggleClicking(state)
     isClicking = state
@@ -200,6 +202,11 @@ local function stopGotoWalk()
         gotoConnection = nil
     end
     moveTarget = nil
+    -- Clean up dummy
+    if gotoDummy then
+        pcall(function() gotoDummy:Destroy() end)
+        gotoDummy = nil
+    end
 end
 
 local function startGotoWalk(targetPos)
@@ -208,90 +215,74 @@ local function startGotoWalk(targetPos)
     stopFollowing()
     moveTarget = targetPos
 
-    local currentWaypointIndex = 1
-    local path = nil
-    local pathRecomputeTimer = 0
-
-    local function computePath()
-        local char = LocalPlayer.Character
-        local hrp = char and char:FindFirstChild("HumanoidRootPart")
-        if not hrp then return nil end
-
-        local newPath = PathfindingService:CreatePath({
-            AgentHeight = 5,
-            AgentRadius = 2,
-            AgentCanJump = true
-        })
-
-        local success, errorMessage = pcall(function()
-            newPath:ComputeAsync(hrp.Position, moveTarget)
-        end)
-
-        if success and newPath.Status == Enum.PathStatus.Success then
-            return newPath
-        else
-            print("[GOTO] Path failed:", success, errorMessage)
-        end
-        return nil
-    end
-
-    path = computePath()
-    if path then
-        print("[GOTO] Path created with", #path:GetWaypoints(), "waypoints")
-    else
-        print("[GOTO] Path is nil!")
-    end
-
-    gotoConnection = RunService.Heartbeat:Connect(function(dt)
-        if not moveTarget then print("[GOTO] moveTarget is nil, stopping"); stopGotoWalk(); return end
-
-        local char = LocalPlayer.Character
-        local humanoid = char and char:FindFirstChildOfClass("Humanoid")
-        local hrp = char and char:FindFirstChild("HumanoidRootPart")
-        if not humanoid or not hrp then print("[GOTO] No humanoid or hrp"); return end
-
-        local currentPos = hrp.Position
-        local dist = (moveTarget - currentPos).Magnitude
-
-        -- Stop if reached destination
-        if dist < 1 then
-            print("[GOTO] Reached destination")
-            stopGotoWalk()
-            return
+    -- Create a ghost dummy at target position and use EXACT follow logic on it
+    pcall(function()
+        if gotoDummy then
+            gotoDummy:Destroy()
+            gotoDummy = nil
         end
 
-        -- Recompute path periodically
-        pathRecomputeTimer = pathRecomputeTimer + dt
-        if pathRecomputeTimer > 0.5 or not path then
-            local newPath = computePath()
-            if newPath then
-                path = newPath
-                currentWaypointIndex = 1
-                print("[GOTO] Path recomputed, waypoint index reset")
-            end
-            pathRecomputeTimer = 0
-        end
+        gotoDummy = Instance.new("Model")
+        gotoDummy.Name = "GotoGhost"
 
-        -- Move along path
-        if path then
-            local waypoints = path:GetWaypoints()
-            if currentWaypointIndex <= #waypoints then
-                local waypoint = waypoints[currentWaypointIndex]
-                if waypoint then
-                    humanoid:MoveTo(waypoint.Position)
-                    -- Move to next waypoint if close
-                    if (hrp.Position - waypoint.Position).Magnitude < 3 then
-                        currentWaypointIndex = currentWaypointIndex + 1
-                    end
-                end
-            else
-                print("[GOTO] All waypoints done, stopping")
+        -- Create proper HumanoidRootPart
+        local dummyHRP = Instance.new("Part")
+        dummyHRP.Name = "HumanoidRootPart"
+        dummyHRP.Size = Vector3.new(2, 2, 1)
+        dummyHRP.Transparency = 1
+        dummyHRP.CanCollide = false
+        dummyHRP.Anchored = true
+        dummyHRP.CFrame = CFrame.new(targetPos)
+        dummyHRP.Parent = gotoDummy
+
+        -- Create a Humanoid (required for MoveTo to work properly)
+        local dummyHum = Instance.new("Humanoid")
+        dummyHum.Health = 100
+        dummyHum.MaxHealth = 100
+        dummyHum.PlatformStand = false  -- NOT standing - allow movement
+        dummyHum.Parent = gotoDummy
+
+        -- Assign a fake UserId to make it look like a player to the system
+        gotoDummy:SetAttribute("FakeUserId", 999999999)
+
+        gotoDummy.Parent = workspace
+
+        print("[GOTO] Created ghost dummy at:", targetPos)
+
+        -- Now use the EXACT same logic as startFollowing, but with the ghost
+        -- Mimic how follow works with players
+        gotoConnection = RunService.Heartbeat:Connect(function()
+            if not gotoDummy or not gotoDummy.Parent then
                 stopGotoWalk()
+                return
             end
-        else
-            print("[GOTO] No path, using direct MoveTo")
-            humanoid:MoveTo(moveTarget)
-        end
+
+            local char = LocalPlayer.Character
+            if not char then return end
+
+            local humanoid = char:FindFirstChildOfClass("Humanoid")
+            if not humanoid then return end
+
+            -- Get the ghost's HRP position (like targetPlayer.Character.HumanoidRootPart)
+            local ghostHRP = gotoDummy:FindFirstChild("HumanoidRootPart")
+            if not ghostHRP then return end
+
+            local ghostPos = ghostHRP.Position
+
+            -- This is EXACTLY the same as follow's Normal mode
+            -- Just MoveTo to the target position every frame
+            char.Humanoid:MoveTo(ghostPos)
+
+            -- Check distance and stop if reached
+            local charHRP = char:FindFirstChild("HumanoidRootPart")
+            if charHRP then
+                local dist = (ghostPos - charHRP.Position).Magnitude
+                if dist < 1 then
+                    print("[GOTO] Reached destination")
+                    stopGotoWalk()
+                end
+            end
+        end)
     end)
 end
 
