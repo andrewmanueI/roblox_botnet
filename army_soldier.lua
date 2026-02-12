@@ -1,4 +1,5 @@
 local HttpService = game:GetService("HttpService")
+local PathfindingService = game:GetService("PathfindingService")
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
@@ -205,16 +206,43 @@ local function startGotoWalk(targetPos)
     stopFollowing()
     moveTarget = targetPos
 
-    gotoConnection = RunService.Heartbeat:Connect(function()
+    local currentWaypointIndex = 1
+    local path = nil
+    local pathRecomputeTimer = 0
+
+    local function computePath()
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return nil end
+
+        local newPath = PathfindingService:CreatePath({
+            AgentHeight = 5,
+            AgentRadius = 2,
+            AgentCanJump = true
+        })
+
+        local success, errorMessage = pcall(function()
+            newPath:ComputeAsync(hrp.Position, moveTarget)
+        end)
+
+        if success and newPath.Status == Enum.PathStatus.Success then
+            return newPath
+        end
+        return nil
+    end
+
+    path = computePath()
+
+    gotoConnection = RunService.Heartbeat:Connect(function(dt)
         if not moveTarget then stopGotoWalk(); return end
+
         local char = LocalPlayer.Character
         local humanoid = char and char:FindFirstChildOfClass("Humanoid")
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
         if not humanoid or not hrp then return end
 
         local currentPos = hrp.Position
-        local diff = moveTarget - currentPos
-        local dist = diff.Magnitude
+        local dist = (moveTarget - currentPos).Magnitude
 
         -- Stop if reached destination
         if dist < 1 then
@@ -222,8 +250,31 @@ local function startGotoWalk(targetPos)
             return
         end
 
-        -- Same exact logic as follow - just MoveTo to target
-        humanoid:MoveTo(moveTarget)
+        -- Recompute path periodically
+        pathRecomputeTimer = pathRecomputeTimer + dt
+        if pathRecomputeTimer > 0.5 or not path then
+            local newPath = computePath()
+            if newPath then
+                path = newPath
+                currentWaypointIndex = 1
+            end
+            pathRecomputeTimer = 0
+        end
+
+        -- Move along path
+        if path then
+            local waypoints = path:GetWaypoints()
+            if currentWaypointIndex <= #waypoints then
+                local waypoint = waypoints[currentWaypointIndex]
+                if waypoint then
+                    humanoid:MoveTo(waypoint.Position)
+                    -- Move to next waypoint if close
+                    if (hrp.Position - waypoint.Position).Magnitude < 3 then
+                        currentWaypointIndex = currentWaypointIndex + 1
+                    end
+                end
+            end
+        end
     end)
 end
 
