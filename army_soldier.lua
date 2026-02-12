@@ -234,11 +234,14 @@ local function startGotoWalk(targetPos)
                 stagnantFrames = 0
             end
 
-            -- Stop if stuck for 60 frames (~1 second)
-            if stagnantFrames > 60 then
+            -- Stop if stuck for 180 frames (~3 seconds) - more lenient
+            if stagnantFrames > 180 then
                 stopGotoWalk()
                 return
             end
+        else
+            -- First frame - don't count as stagnant
+            stagnantFrames = 0
         end
         lastPos = currentPos
 
