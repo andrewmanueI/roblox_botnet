@@ -201,100 +201,16 @@ local function stopGotoWalk()
         gotoConnection = nil
     end
     moveTarget = nil
-    -- Clean up dummy
-    if gotoDummy then
-        pcall(function() gotoDummy:Destroy() end)
-        gotoDummy = nil
-    end
 end
 
 local function startGotoWalk(targetPos)
-    print("[GOTO] startGotoWalk called with:", targetPos)
     stopGotoWalk()
     stopFollowing()
-    moveTarget = targetPos
-
-    -- Create a ghost dummy at target position and use EXACT follow logic on it
-    pcall(function()
-        if gotoDummy then
-            gotoDummy:Destroy()
-            gotoDummy = nil
-        end
-
-        gotoDummy = Instance.new("Model")
-        gotoDummy.Name = "GotoGhost"
-
-        -- Create proper HumanoidRootPart
-        local dummyHRP = Instance.new("Part")
-        dummyHRP.Name = "HumanoidRootPart"
-        dummyHRP.Size = Vector3.new(2, 2, 1)
-        dummyHRP.Transparency = 1
-        dummyHRP.CanCollide = false
-        dummyHRP.Anchored = true
-        dummyHRP.CFrame = CFrame.new(targetPos)
-        dummyHRP.Parent = gotoDummy
-
-        -- Create a Humanoid (required for MoveTo to work properly)
-        local dummyHum = Instance.new("Humanoid")
-        dummyHum.Health = 100
-        dummyHum.MaxHealth = 100
-        dummyHum.PlatformStand = false  -- NOT standing - allow movement
-        dummyHum.Parent = gotoDummy
-
-        -- Assign a fake UserId to make it look like a player to the system
-        gotoDummy:SetAttribute("FakeUserId", 999999999)
-
-        gotoDummy.Parent = workspace
-
-        print("[GOTO] Created ghost dummy at:", targetPos)
-
-        -- Now use the EXACT same logic as startFollowing, but with the ghost
-        -- Mimic how follow works with players
-        gotoConnection = RunService.Heartbeat:Connect(function()
-            if not gotoDummy or not gotoDummy.Parent then
-                stopGotoWalk()
-                return
-            end
-
-            local char = LocalPlayer.Character
-            if not char then return end
-
-            local humanoid = char:FindFirstChildOfClass("Humanoid")
-            if not humanoid then return end
-
-            -- Get the ghost's HRP position (like targetPlayer.Character.HumanoidRootPart)
-            local ghostHRP = gotoDummy:FindFirstChild("HumanoidRootPart")
-            if not ghostHRP then return end
-
-            -- Apply Circle offset logic (Orbit the ghost)
-            local angle = math.rad((os.time() * 50 + LocalPlayer.UserId) % 360)
-            local radius = 15
-            local offset = Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
-            local orbitPos = ghostPos + offset
-
-            -- Autojump - check if obstacle ahead (only if enabled)
-            local charHRP = char:FindFirstChild("HumanoidRootPart")
-            if autoJumpEnabled and charHRP and humanoid.Jump then
-                local check1 = workspace:FindPartOnRay(
-                    Ray.new(charHRP.Position - Vector3.new(0, 1.5, 0), charHRP.CFrame.LookVector * 3),
-                    char
-                )
-                local check2 = workspace:FindPartOnRay(
-                    Ray.new(charHRP.Position + Vector3.new(0, 1.5, 0), charHRP.CFrame.LookVector * 3),
-                    char
-                )
-                if check1 or check2 then
-                    humanoid.Jump = true
-                end
-            end
-
-            -- Move to the calculated orbit position
-            char.Humanoid:MoveTo(orbitPos)
-
-            -- In Orbit mode, we don't 'reach' and stop, we keep circling.
-            -- (Distance check removed to allow continuous orbiting)
-        end)
-    end)
+    
+    local char = LocalPlayer.Character
+    if char and char:FindFirstChildOfClass("Humanoid") then
+        char:FindFirstChildOfClass("Humanoid"):MoveTo(targetPos)
+    end
 end
 
 local function startFollowing(userId, mode)
