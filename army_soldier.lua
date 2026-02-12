@@ -6,7 +6,6 @@ local RunService = game:GetService("RunService")
 
 -- Forward declarations
 local highlightPlayers, clearHighlights, startFollowing, stopFollowing
-local getVisibleButtons
 
 local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
@@ -507,22 +506,6 @@ local function createPanel()
         }
     end
     
-    local function getVisibleButtons()
-        local buttons = {}
-        local function recurse(obj)
-            if obj:IsA("GuiButton") and obj.Visible then
-                if obj.AbsoluteSize.X > 0 and obj.AbsoluteSize.Y > 0 then
-                    table.insert(buttons, obj)
-                end
-            end
-            for _, child in ipairs(obj:GetChildren()) do
-                recurse(child)
-            end
-        end
-        recurse(LocalPlayer.PlayerGui)
-        return buttons
-    end
-
     -- Create command buttons
     -- Movement Drawer
     local movementDrawer = createDrawer({
@@ -777,59 +760,6 @@ local function createPanel()
                 Callback = function()
                     sendCommand("rejoin")
                     sendNotify("Command", "Rejoin executed")
-                end
-            }
-        }
-    })
-    
-    -- Info Drawer (Mobile Inspector)
-    local infoDrawer -- Defined early for closure access
-    infoDrawer = createDrawer({
-        Title = "Information",
-        Description = "Inspect UI Elements",
-        Icon = "ℹ️",
-        Color = Color3.fromRGB(100, 200, 255),
-        Buttons = {
-            {
-                Text = "Scan Mobile Buttons",
-                Color = Color3.fromRGB(100, 255, 200),
-                Callback = function()
-                    local container = infoDrawer:FindFirstChild("Content")
-                    if not container then return end
-                    
-                    -- Clear previous results
-                    for _, child in ipairs(container:GetChildren()) do
-                        if child.Name == "InfoResult" then
-                            child:Destroy()
-                        end
-                    end
-                    
-                    local found = getVisibleButtons()
-                    sendNotify("Info", "Found " .. #found .. " buttons")
-                    
-                    for _, btn in ipairs(found) do
-                        local infoFrame = Instance.new("Frame", container)
-                        infoFrame.Name = "InfoResult"
-                        infoFrame.Size = UDim2.new(1, 0, 0, 50)
-                        infoFrame.BackgroundTransparency = 0.9
-                        infoFrame.BackgroundColor3 = Color3.fromRGB(0,0,0)
-                        infoFrame.BorderSizePixel = 0
-                        
-                        local lbl = Instance.new("TextLabel", infoFrame)
-                        lbl.Size = UDim2.new(1, -10, 1, 0)
-                        lbl.Position = UDim2.new(0, 5, 0, 0)
-                        lbl.BackgroundTransparency = 1
-                        lbl.TextColor3 = Color3.fromRGB(200,200,200)
-                        lbl.TextSize = 10
-                        lbl.Font = Enum.Font.Code
-                        lbl.TextXAlignment = Enum.TextXAlignment.Left
-                        lbl.Text = string.format("Name: %s\nPos: %d, %d | Size: %d x %d\nText: %s", 
-                            btn.Name, 
-                            btn.AbsolutePosition.X, btn.AbsolutePosition.Y,
-                            btn.AbsoluteSize.X, btn.AbsoluteSize.Y,
-                            (btn:IsA("TextButton") and btn.Text:sub(1,15) or "N/A")
-                        )
-                    end
                 end
             }
         }
