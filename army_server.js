@@ -35,15 +35,14 @@ const server = http.createServer((req, res) => {
             if (newAction) {
                 console.log(`[CMD] New Order Issued: ${newAction}`);
                 
-                // Update the global state
                 latestCommand = {
                     id: Date.now(),
                     action: newAction,
                     time: Date.now()
                 };
                 
-                // Identify "Impulse" commands that should auto-clear
-                const impulses = ["jump", "reset", "reload", "voodoo", "rejoin"];
+                // Only auto-clear rejoin and reset as requested
+                const impulses = ["rejoin", "reset"];
                 const isImpulse = impulses.some(imp => newAction.startsWith(imp));
 
                 if (isImpulse) {
@@ -51,11 +50,7 @@ const server = http.createServer((req, res) => {
                     setTimeout(() => {
                         if (latestCommand.action === newAction) {
                             console.log(`[AUTO-CLEAR] Clearing impulse: ${newAction}`);
-                            latestCommand = {
-                                id: Date.now(),
-                                action: "wait",
-                                time: Date.now()
-                            };
+                            latestCommand = { id: Date.now(), action: "wait", time: Date.now() };
                         }
                     }, 5000);
                 } else {
@@ -71,10 +66,11 @@ const server = http.createServer((req, res) => {
 
 server.listen(5555, '0.0.0.0');
 
-// Internal Console Support
+// Internal Console Support (Synchronized with POST logic)
 process.stdin.on('data', (data) => {
     const cmd = data.toString().trim();
     if (!cmd) return;
+    
     console.log(`[INTERNAL] Order: ${cmd}`);
     latestCommand = {
         id: Date.now(),
@@ -82,15 +78,13 @@ process.stdin.on('data', (data) => {
         time: Date.now()
     };
     
-    // Auto-clear command after 5 seconds
-    setTimeout(() => {
-        if (latestCommand.action === cmd) {
-            console.log(`[AUTO-CLEAR] Clearing command: ${cmd}`);
-            latestCommand = {
-                id: Date.now(),
-                action: "wait",
-                time: Date.now()
-            };
-        }
-    }, 2000);
+    const impulses = ["rejoin", "reset"];
+    if (impulses.some(imp => cmd.startsWith(imp))) {
+        setTimeout(() => {
+            if (latestCommand.action === cmd) {
+                console.log(`[AUTO-CLEAR] Clearing impulse: ${cmd}`);
+                latestCommand = { id: Date.now(), action: "wait", time: Date.now() };
+            }
+        }, 5000);
+    }
 });
