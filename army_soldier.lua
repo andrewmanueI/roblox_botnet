@@ -740,57 +740,6 @@ local function createPanel()
     
 
     
-    -- Actions Drawer
-    local actionsDrawer = createDrawer({
-        Title = "Actions",
-        Description = "Automated actions",
-        Icon = "⚡",
-        Color = Color3.fromRGB(255, 220, 100),
-        Buttons = {
-            {
-                Text = "Start Clicking",
-                Color = Color3.fromRGB(100, 255, 150),
-                Callback = function()
-                    toggleClicking(true)
-                    sendNotify("Actions", "Autoclicker Started")
-                end
-            },
-            {
-                Text = "Stop Clicking",
-                Color = Color3.fromRGB(255, 100, 100),
-                Callback = function()
-                    toggleClicking(false)
-                    sendNotify("Actions", "Autoclicker Stopped")
-                end
-            },
-            {
-                Text = "Army Voodoo",
-                Color = Color3.fromRGB(200, 100, 255),
-                Callback = function()
-                    if Mouse.Hit then
-                        local pos = Mouse.Hit.Position
-                        local voodooCmd = string.format("voodoo %.2f,%.2f,%.2f", pos.X, pos.Y, pos.Z)
-                        sendCommand(voodooCmd)
-                        sendNotify("Voodoo", "All soldiers casting at target!")
-                    end
-                end
-            },
-            {
-                Text = "Movement: Normal",
-                Color = Color3.fromRGB(150, 255, 100),
-                Callback = function(btn)
-                    if movementMode == "Normal" then
-                        movementMode = "TP-Walk"
-                    else
-                        movementMode = "Normal"
-                    end
-                    btn.Text = "Movement: " .. movementMode
-                    sendNotify("Movement Mode", "Switched to " .. movementMode)
-                end
-            }
-        }
-    })
-    
     -- Follow Drawer
     local followDrawer = createDrawer({
         Title = "Follow Actions",
