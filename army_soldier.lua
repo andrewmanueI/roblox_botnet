@@ -223,7 +223,7 @@ local function startGotoWalk(targetPos)
         end
 
         -- Same exact logic as follow - just MoveTo to target
-        char.Humanoid:MoveTo(moveTarget)
+        LocalPlayer.Character.Humanoid:MoveTo(moveTarget)
     end)
 end
 
