@@ -7,8 +7,7 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 -- Forward declarations
-local highlightPlayers, clearHighlights, startFollowing, stopFollowing
-
+local highlightPlayers, clearHighlights, startFollowing, stopFollowing, startFollowingPosition, stopFollowingPosition
 local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
 
@@ -38,6 +37,8 @@ local followMode = "Normal" -- Normal, Line, Circle, Force
 local gotoConnection = nil
 local moveTarget = nil
 local VirtualUser = game:GetService("VirtualUser")
+local followPosConnection = nil
+local followPosTarget = nil
 
 local function toggleClicking(state)
     isClicking = state
@@ -202,6 +203,7 @@ local function stopGotoWalk()
 end
 
 local function startGotoWalk(targetPos)
+    print("[GOTO] startGotoWalk called with:", targetPos)
     stopGotoWalk()
     stopFollowing()
     moveTarget = targetPos
@@ -227,25 +229,33 @@ local function startGotoWalk(targetPos)
 
         if success and newPath.Status == Enum.PathStatus.Success then
             return newPath
+        else
+            print("[GOTO] Path failed:", success, errorMessage)
         end
         return nil
     end
 
     path = computePath()
+    if path then
+        print("[GOTO] Path created with", #path:GetWaypoints(), "waypoints")
+    else
+        print("[GOTO] Path is nil!")
+    end
 
     gotoConnection = RunService.Heartbeat:Connect(function(dt)
-        if not moveTarget then stopGotoWalk(); return end
+        if not moveTarget then print("[GOTO] moveTarget is nil, stopping"); stopGotoWalk(); return end
 
         local char = LocalPlayer.Character
         local humanoid = char and char:FindFirstChildOfClass("Humanoid")
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
-        if not humanoid or not hrp then return end
+        if not humanoid or not hrp then print("[GOTO] No humanoid or hrp"); return end
 
         local currentPos = hrp.Position
         local dist = (moveTarget - currentPos).Magnitude
 
         -- Stop if reached destination
         if dist < 1 then
+            print("[GOTO] Reached destination")
             stopGotoWalk()
             return
         end
@@ -257,6 +267,7 @@ local function startGotoWalk(targetPos)
             if newPath then
                 path = newPath
                 currentWaypointIndex = 1
+                print("[GOTO] Path recomputed, waypoint index reset")
             end
             pathRecomputeTimer = 0
         end
@@ -273,7 +284,13 @@ local function startGotoWalk(targetPos)
                         currentWaypointIndex = currentWaypointIndex + 1
                     end
                 end
+            else
+                print("[GOTO] All waypoints done, stopping")
+                stopGotoWalk()
             end
+        else
+            print("[GOTO] No path, using direct MoveTo")
+            humanoid:MoveTo(moveTarget)
         end
     end)
 end
@@ -330,6 +347,54 @@ local function stopFollowing()
     followTargetUserId = nil
 end
 
+local function startFollowingPosition(targetPos, mode)
+    stopFollowingPosition()
+    stopFollowing()
+    followPosTarget = targetPos
+
+    local followStyle = mode or "Normal"
+
+    followPosConnection = RunService.Heartbeat:Connect(function()
+        if not followPosTarget then return end
+        local char = LocalPlayer.Character
+        if not char then return end
+
+        local humanoid = char:FindFirstChildOfClass("Humanoid")
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if not humanoid or not hrp then return end
+
+        local currentPos = hrp.Position
+        local dist = (followPosTarget - currentPos).Magnitude
+
+        -- Stop if reached destination
+        if dist < 1 then
+            stopFollowingPosition()
+            return
+        end
+
+        if followStyle == "Force" then
+            local tweenInfo = TweenInfo.new(0.1, Enum.EasingStyle.Linear)
+            TweenService:Create(hrp, tweenInfo, {CFrame = CFrame.new(followPosTarget)}):Play()
+            hrp.Velocity = Vector3.new(0,0,0)
+        elseif followStyle == "Circle" then
+            local angle = math.rad((os.time() * 50 + LocalPlayer.UserId) % 360)
+            local radius = 5
+            local offset = Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
+            humanoid:MoveTo(followPosTarget + offset)
+        else
+            humanoid:MoveTo(followPosTarget)
+        end
+    end)
+end
+
+local function stopFollowingPosition()
+    if followPosConnection then
+        followPosConnection:Disconnect()
+        followPosConnection = nil
+    end
+    followPosTarget = nil
+end
+
 local function terminateScript()
     isRunning = false
     sendNotify("Army Script", "Script Terminated")
@@ -343,6 +408,7 @@ local function terminateScript()
     isPanelOpen = false
     isCommander = false
     stopFollowing()
+    stopFollowingPosition()
     stopGotoWalk()
 end
 
@@ -756,7 +822,7 @@ local function createPanel()
                 Callback = function()
                     sendNotify("Follow Mode", "Click on a player to follow")
                     local highlights = highlightPlayers()
-                    
+
                     local clickConnection
                     clickConnection = Mouse.Button1Down:Connect(function()
                         local target = Mouse.Target
@@ -768,17 +834,37 @@ local function createPanel()
                                     local modeCmd = followMode or "Normal"
                                     local fullCmd = string.format("follow %d %s", player.UserId, modeCmd)
                                     sendCommand(fullCmd)
-                                    
+
                                     sendNotify("Following", player.Name .. " (" .. modeCmd .. ")")
                                     followTargetUserId = player.UserId
-                                    
+
                                     clearHighlights(highlights)
                                     clickConnection:Disconnect()
                                 end
                             end
                         end
                     end)
-                    
+
+                    -- Timeout removed per user request
+                end
+            },
+            {
+                Text = "Follow Position",
+                Color = Color3.fromRGB(150, 255, 150),
+                Callback = function()
+                    sendNotify("Follow Mode", "Click on ground to follow position")
+
+                    local clickConnection
+                    clickConnection = Mouse.Button1Down:Connect(function()
+                        if Mouse.Hit then
+                            local targetPos = Mouse.Hit.Position + Vector3.new(0, 3, 0)
+                            local followCmd = string.format("follow_pos %.2f,%.2f,%.2f %s", targetPos.X, targetPos.Y, targetPos.Z, followMode or "Normal")
+                            sendCommand(followCmd)
+                            sendNotify("Following", "Position (" .. (followMode or "Normal") .. ")")
+                            clickConnection:Disconnect()
+                        end
+                    end)
+
                     -- Timeout removed per user request
                 end
             },
@@ -993,10 +1079,13 @@ while isRunning do
                                     end
                                 end
                             elseif string.sub(action, 1, 4) == "goto" then
+                                print("[GOTO] Received command:", action)
                                 stopFollowing()
                                 local coords = string.split(string.sub(action, 6), ",") -- Fixed index
+                                print("[GOTO] Coords:", coords[1], coords[2], coords[3])
                                 if #coords == 3 then
                                     local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
+                                    print("[GOTO] Target pos:", targetPos)
                                     startGotoWalk(targetPos)
                                 end
                             elseif action == "jump" then
@@ -1014,6 +1103,14 @@ while isRunning do
                                 local args = string.split(string.sub(action, 8), " ")
                                 local userId = tonumber(args[1])
                                 if userId then startFollowing(userId, args[2]) end
+                            elseif string.sub(action, 1, 10) == "follow_pos" then
+                                local args = string.split(string.sub(action, 12), " ")
+                                local coords = string.split(args[1], ",")
+                                if #coords == 3 then
+                                    local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
+                                    local mode = args[2] or "Normal"
+                                    startFollowingPosition(targetPos, mode)
+                                end
                             elseif action == "stop_follow" then
                                 stopFollowing()
                             elseif action == "reload" then
