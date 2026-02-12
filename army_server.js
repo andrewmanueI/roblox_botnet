@@ -9,15 +9,14 @@ let latestCommand = {
     action: "wait",  // The actual command (jump, dance, etc)
     time: Date.now()
 };
-let impulseTimer = null;
 
-// Client and command tracking
-const clients = new Map(); // clientId -> { id, registeredAt, lastSeen, lastCommandId, executedCommands }
+const clients = new Map(); // clientId -> { id, registeredAt, lastSeen, lastCommandId, executedCommands, status, error }
+const crypto = require('crypto');
 const commandHistory = new Map(); // commandId -> { id, action, time, type, executedBy }
 const MAX_HISTORY = 100;
 
 const generateClientId = () => {
-    return 'client_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+    return crypto.randomUUID();
 };
 
 const updateCommand = (action, source) => {
@@ -72,6 +71,17 @@ const updateCommand = (action, source) => {
 
     return true;
 };
+
+const cleanupClients = () => {
+    const now = Date.now();
+    for (const [id, client] of clients.entries()) {
+        if (now - client.lastSeen > 60000) { // 60 seconds timeout
+            console.log(`[CLIENT] Time-out: ${id}`);
+            clients.delete(id);
+        }
+    }
+};
+setInterval(cleanupClients, 10000);
 
 console.log("ARMY HTTP SERVER RUNNING (POLLING MODE)");
 console.log("Listening on Port: 5555");

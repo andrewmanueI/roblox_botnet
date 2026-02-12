@@ -925,9 +925,9 @@ end))
 
 
 -- Register client before polling starts
-task.wait(1) -- Small delay to let server be ready
+task.wait(1)
 local registered = false
-for i = 1, 5 do -- Try 5 times
+for i = 1, 5 do
     if registerClient() then
         registered = true
         break
@@ -939,225 +939,140 @@ if not registered then
     sendNotify("Warning", "Failed to register - running without ID")
 end
 
--- Polling loop
-task.spawn(function()
-    while isRunning do
-        -- Send periodic heartbeat
-        if clientId and os.time() - lastHeartbeat >= HEARTBEAT_INTERVAL then
-            sendHeartbeat()
-            lastHeartbeat = os.time()
+sendNotify("Army Script", "Press G to toggle Panel | F3 to Exit")
+print("Army Soldier loaded - Press G for panel")
+
+-- Polling loop (Main Thread)
+print("[ARMY] Starting command loop...")
+while isRunning do
+    -- Send periodic heartbeat
+    if clientId and os.time() - lastHeartbeat >= HEARTBEAT_INTERVAL then
+        sendHeartbeat()
+        lastHeartbeat = os.time()
+    end
+
+    -- Enhanced polling with ETag support
+    local request = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
+    local success, response
+
+    if request then
+        local headers = {}
+        if lastETag then
+            headers["If-None-Match"] = lastETag
         end
+        success, response = pcall(function()
+            return request({
+                Url = SERVER_URL .. "/",
+                Method = "GET",
+                Headers = headers
+            })
+        end)
+    else
+        -- Fallback to game:HttpGet
+        success, response = pcall(function()
+            return { StatusCode = 200, Body = game:HttpGet(SERVER_URL, true) }
+        end)
+    end
 
-        -- Enhanced polling with ETag support
-        local request = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
-        local success, response
+    if success and isRunning and response then
+        -- Handle 304 Not Modified
+        if response.StatusCode == 304 then
+            consecutiveNoChange = consecutiveNoChange + 1
+            if consecutiveNoChange > 10 then
+                currentPollRate = math.min(MAX_POLL_RATE, currentPollRate + 0.1)
+            end
+        elseif response.StatusCode == 200 then
+            if response.Headers and response.Headers["ETag"] then
+                lastETag = response.Headers["ETag"]
+            end
 
-        if request then
-            success, response = pcall(function()
-                local headers = {}
-                if lastETag then
-                    headers["If-None-Match"] = lastETag
-                end
-                return request({
-                    Url = SERVER_URL .. "/",
-                    Method = "GET",
-                    Headers = headers
-                })
+            local jsonSuccess, data = pcall(function()
+                return HttpService:JSONDecode(response.Body)
             end)
-        else
-            -- Fallback to game:HttpGet
-            success, response = pcall(function()
-                return { StatusCode = 200, Body = game:HttpGet(SERVER_URL, true) }
-            end)
-        end
 
-        if success and isRunning and response then
-            -- Handle 304 Not Modified
-            if response.StatusCode == 304 then
-                -- No new command, skip processing and adjust polling rate
-                consecutiveNoChange = consecutiveNoChange + 1
-                -- Slow down polling when no changes
-                if consecutiveNoChange > 10 then
-                    currentPollRate = math.min(MAX_POLL_RATE, currentPollRate + 0.1)
-                end
-                -- Wait and continue to next iteration
-                task.wait(currentPollRate)
-            elseif response.StatusCode == 200 then
-                -- Update ETag from response headers if available
-                if response.Headers and response.Headers["ETag"] then
-                    lastETag = response.Headers["ETag"]
-                end
+            if jsonSuccess and data and data.id and data.id ~= lastCommandId then
+                local commandId = data.id
 
-                local jsonSuccess, data = pcall(function()
-                    return HttpService:JSONDecode(response.Body)
-                end)
-
-                if jsonSuccess and data and data.id and data.id ~= lastCommandId then
-                    local commandId = data.id
-
-                    -- Check if already executed
-                    if executedCommands[commandId] then
-                        return -- Already executed this command
-                    end
-
+                if not executedCommands[commandId] then
                     lastCommandId = commandId
                     local action = data.action
-                    local executionSuccess = true
-                    local executionError = nil
-
-                    -- Reset polling rate when we get a new command
+                    
                     consecutiveNoChange = 0
                     currentPollRate = MIN_POLL_RATE
 
-                    if action ~= "wait" then
-                        -- If we are commander, don't execute commands (unless we want to test)
-                        if isCommander then
-                            -- Optional: Print only
-                            -- print("Commander ignored order: " .. action)
-                        else
-                            sendNotify("New Order", action)
+                    if action ~= "wait" and not isCommander then
+                        sendNotify("New Order", action)
 
-                            -- Execute commands with error tracking
-                            local execResult, execError = pcall(function()
-                                if string.sub(action, 1, 5) == "bring" then
-                                    stopFollowing() -- Stop follow to prevent conflict
-                                    local coords = string.split(string.sub(action, 8), ",")
-                            if #coords == 3 then
-                                local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
-                                if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
-                                    local hrp = LocalPlayer.Character.HumanoidRootPart
-                                    local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
-                                    
-                                    -- Unsit if seated
-                                    if humanoid and humanoid.SeatPart then
-                                        humanoid.Sit = false
-                                        task.wait(0.1)
-                                    end
-                                    
-                                    if movementMode == "TP-Walk" then
-                                        startTPWalk(targetPos)
-                                        return
-                                    end
-
-                                    -- Normal Walk logic
-                                    -- Calculate distance for tween speed
-                                    local distance = (hrp.Position - targetPos).Magnitude
-                                    local tweenSpeed = math.max(distance / 50, 1) -- Adjust speed based on distance
-                                    
-                                    -- Tween to position
-                                    TweenService:Create(
-                                        hrp, 
-                                        TweenInfo.new(tweenSpeed, Enum.EasingStyle.Linear), 
-                                        {CFrame = CFrame.new(targetPos + Vector3.new(math.random(-3, 3), 1, math.random(-3, 3)))}
-                                    ):Play()
-                                    
-                                    sendNotify("Moving", "Traveling to Commander...")
-                                end
-                            end
-                            
-                        elseif string.sub(action, 1, 4) == "goto" then
-                            if not isCommander then
-                                stopFollowing() -- Stop follow to prevent conflict
-                                local coords = string.split(string.sub(action, 7), ",")
+                        local execResult, execError = pcall(function()
+                            if string.sub(action, 1, 5) == "bring" then
+                                stopFollowing()
+                                local coords = string.split(string.sub(action, 7), ",") -- Fixed index
                                 if #coords == 3 then
                                     local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
-                                    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
-                                        local humanoid = LocalPlayer.Character.Humanoid
-                                        
-                                        -- Unsit if seated
-                                        if humanoid.SeatPart then
-                                            humanoid.Sit = false
-                                            task.wait(0.1)
-                                        end
-                                        
+                                    local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                                    if hrp then
                                         if movementMode == "TP-Walk" then
                                             startTPWalk(targetPos)
-                                            return
+                                        else
+                                            local distance = (hrp.Position - targetPos).Magnitude
+                                            local tweenSpeed = math.max(distance / 50, 1)
+                                            TweenService:Create(hrp, TweenInfo.new(tweenSpeed, Enum.EasingStyle.Linear), {
+                                                CFrame = CFrame.new(targetPos + Vector3.new(math.random(-3, 3), 1, math.random(-3, 3)))
+                                            }):Play()
                                         end
-
-                                        -- Normal Walk logic
-                                        -- Walk to position
-                                        humanoid:MoveTo(targetPos)
-                                        sendNotify("Walking", "Moving to location...")
                                     end
                                 end
-                            end
-                            
-                        elseif action == "jump" then
-                            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
-                                LocalPlayer.Character.Humanoid.Jump = true
-                            end
-                            
-                        elseif string.sub(action, 1, 11) == "join_server" then
-                            local args = string.split(string.sub(action, 13), " ")
-                            if #args == 2 then
-                                local targetPlaceId = tonumber(args[1])
-                                local targetJobId = args[2]
-                                
-                                if game.JobId == targetJobId then
-                                    sendNotify("Status", "Already in Commander's Server")
-                                else
-                                    sendNotify("Traveling", "Joining Commander...")
-                                    game:GetService("TeleportService"):TeleportToPlaceInstance(targetPlaceId, targetJobId, LocalPlayer)
+                            elseif string.sub(action, 1, 4) == "goto" then
+                                stopFollowing()
+                                local coords = string.split(string.sub(action, 6), ",") -- Fixed index
+                                if #coords == 3 then
+                                    local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
+                                    local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid")
+                                    if humanoid then
+                                        if movementMode == "TP-Walk" then
+                                            startTPWalk(targetPos)
+                                        else
+                                            humanoid:MoveTo(targetPos)
+                                        end
+                                    end
+                                end
+                            elseif action == "jump" then
+                                if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+                                    LocalPlayer.Character.Humanoid.Jump = true
+                                end
+                            elseif string.sub(action, 1, 11) == "join_server" then
+                                local args = string.split(string.sub(action, 13), " ")
+                                if #args == 2 then
+                                    game:GetService("TeleportService"):TeleportToPlaceInstance(tonumber(args[1]), args[2], LocalPlayer)
+                                end
+                            elseif action == "reset" then
+                                if LocalPlayer.Character then LocalPlayer.Character:BreakJoints() end
+                            elseif string.sub(action, 1, 6) == "follow" then
+                                local args = string.split(string.sub(action, 8), " ")
+                                local userId = tonumber(args[1])
+                                if userId then startFollowing(userId, args[2]) end
+                            elseif action == "stop_follow" then
+                                stopFollowing()
+                            elseif action == "reload" then
+                                terminateScript()
+                                loadstring(game:HttpGet(RELOAD_URL .. "?t=" .. os.time()))()
+                                return -- Stop this thread
+                            elseif action == "rejoin" then
+                                game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
+                            elseif string.sub(action, 1, 6) == "voodoo" then
+                                local coords = string.split(string.sub(action, 8), ",")
+                                if #coords == 3 then
+                                    fireVoodoo(Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3])))
                                 end
                             end
-                            
-                        elseif action == "reset" then
-                            if LocalPlayer.Character then
-                                LocalPlayer.Character:BreakJoints()
-                            end
-                            
-                        elseif string.sub(action, 1, 6) == "follow" then
-                            local args = string.split(string.sub(action, 8), " ")
-                            local userId = tonumber(args[1])
-                            local mode = args[2]
-                            if userId then
-                                startFollowing(userId, mode)
-                                local targetPlayer = Players:GetPlayerByUserId(userId)
-                                if targetPlayer then
-                                    sendNotify("Following", targetPlayer.Name .. (mode and " ("..mode..")" or ""))
-                                end
-                            end
-
-                            
-                        elseif action == "stop_follow" then
-                            stopFollowing()
-                            sendNotify("Status", "Stopped following")
-                            
-                        elseif action == "reload" then
-                            sendNotify("System", "Reloading Script...")
-                            terminateScript()
-                            task.spawn(function()
-                                -- Add timestamp to bypass GitHub CDN cache
-                                local reloadUrl = RELOAD_URL .. "?t=" .. os.time()
-                                loadstring(game:HttpGet(reloadUrl))()
-                            end)
-                            
-                        elseif action == "rejoin" then
-                            game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
-                            
-                        elseif string.sub(action, 1, 6) == "voodoo" then
-                            local coords = string.split(string.sub(action, 8), ",")
-                            if #coords == 3 then
-                                local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
-                                fireVoodoo(targetPos)
-                                print("Army: Casted Voodoo at " .. tostring(targetPos))
-                            end
-                        end
-                        end) -- End of pcall for command execution
-
-                        -- Track execution result
-                        executionSuccess = execResult
-                        executionError = execError
-
-                        -- Send acknowledgment
-                        acknowledgeCommand(commandId, executionSuccess, executionError)
+                        end)
+                        acknowledgeCommand(commandId, execResult, execError)
                     end
                 end
             end
         end
     end
+    task.wait(currentPollRate)
 end
 
-sendNotify("Army Script", "Press G to toggle Panel | F3 to Exit")
-print("Army Soldier loaded - Press G for panel")
+sendNotify("Army Script", "Script Terminated")
