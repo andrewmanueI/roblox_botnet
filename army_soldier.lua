@@ -208,7 +208,7 @@ local function startGotoWalk(targetPos)
     gotoConnection = RunService.Heartbeat:Connect(function()
         if not moveTarget then stopGotoWalk(); return end
         local char = LocalPlayer.Character
-        local humanoid = char and char:FindFirstChild("Humanoid")
+        local humanoid = char and char:FindFirstChildOfClass("Humanoid")
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
         if not humanoid or not hrp then return end
 
@@ -223,7 +223,7 @@ local function startGotoWalk(targetPos)
         end
 
         -- Same exact logic as follow - just MoveTo to target
-        LocalPlayer.Character.Humanoid:MoveTo(moveTarget)
+        humanoid:MoveTo(moveTarget)
     end)
 end
 
