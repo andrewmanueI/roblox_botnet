@@ -266,7 +266,11 @@ local function startGotoWalk(targetPos)
             local ghostHRP = gotoDummy:FindFirstChild("HumanoidRootPart")
             if not ghostHRP then return end
 
-            local ghostPos = ghostHRP.Position
+            -- Apply Circle offset logic (Orbit the ghost)
+            local angle = math.rad((os.time() * 50 + LocalPlayer.UserId) % 360)
+            local radius = 15
+            local offset = Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
+            local orbitPos = ghostPos + offset
 
             -- Autojump - check if obstacle ahead (only if enabled)
             local charHRP = char:FindFirstChild("HumanoidRootPart")
@@ -284,18 +288,11 @@ local function startGotoWalk(targetPos)
                 end
             end
 
-            -- This is EXACTLY the same as follow's Normal mode
-            -- Just MoveTo to the target position every frame
-            char.Humanoid:MoveTo(ghostPos)
+            -- Move to the calculated orbit position
+            char.Humanoid:MoveTo(orbitPos)
 
-            -- Check distance and stop if reached
-            if charHRP then
-                local dist = (ghostPos - charHRP.Position).Magnitude
-                if dist < 1 then
-                    print("[GOTO] Reached destination")
-                    stopGotoWalk()
-                end
-            end
+            -- In Orbit mode, we don't 'reach' and stop, we keep circling.
+            -- (Distance check removed to allow continuous orbiting)
         end)
     end)
 end
