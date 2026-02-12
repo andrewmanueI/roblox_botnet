@@ -640,10 +640,6 @@ local function createPanel()
                     clickConnection = Mouse.Button1Down:Connect(function()
                         if Mouse.Hit then
                             local targetPos = Mouse.Hit.Position
-                            -- Stop following when walking specifically
-                            sendCommand("stop_follow")
-                            task.wait(0.5)
-
                             local gotoCmd = string.format("goto %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
                             sendCommand(gotoCmd)
                             sendNotify("Goto", "Soldiers walking to location")
