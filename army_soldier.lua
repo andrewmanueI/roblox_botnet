@@ -205,9 +205,6 @@ local function startGotoWalk(targetPos)
     stopFollowing()
     moveTarget = targetPos
 
-    local lastPos = nil
-    local stagnantFrames = 0
-
     gotoConnection = RunService.Heartbeat:Connect(function()
         if not moveTarget then stopGotoWalk() return end
         local char = LocalPlayer.Character
@@ -220,32 +217,12 @@ local function startGotoWalk(targetPos)
         local dist = diff.Magnitude
 
         -- Stop if reached destination
-        if dist < 2 then
+        if dist < 1 then
             stopGotoWalk()
             return
         end
 
-        -- Track if character is stuck/not moving
-        if lastPos then
-            local moveDist = (currentPos - lastPos).Magnitude
-            if moveDist < 0.1 then
-                stagnantFrames = stagnantFrames + 1
-            else
-                stagnantFrames = 0
-            end
-
-            -- Stop if stuck for 180 frames (~3 seconds) - more lenient
-            if stagnantFrames > 180 then
-                stopGotoWalk()
-                return
-            end
-        else
-            -- First frame - don't count as stagnant
-            stagnantFrames = 0
-        end
-        lastPos = currentPos
-
-        -- Keep moving toward target
+        -- Keep moving toward target (refresh path every frame like follow)
         humanoid:MoveTo(moveTarget)
     end)
 end
