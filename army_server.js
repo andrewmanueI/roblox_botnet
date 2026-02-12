@@ -52,7 +52,9 @@ const updateCommand = (action, source) => {
     const isImpulse = command.type === 'impulse';
     if (isImpulse) {
         const currentId = latestCommand.id;
-        console.log(`[TIMER] Impulse detected. Clearing in 5s: ${action}`);
+        // Very short timeout for reload (0.5s), normal for others (5s)
+        const timeout = action === 'reload' ? 500 : 5000;
+        console.log(`[TIMER] Impulse detected. Clearing in ${timeout}ms: ${action}`);
         impulseTimer = setTimeout(() => {
             if (latestCommand.id === currentId) {
                 console.log(`[AUTO-CLEAR] Clearing impulse: ${action}`);
@@ -65,7 +67,7 @@ const updateCommand = (action, source) => {
                 };
                 commandHistory.set(commandSeq, latestCommand);
             }
-        }, 5000);
+        }, timeout);
     } else {
         console.log(`[PERSISTENT] State command set: ${action}`);
     }
