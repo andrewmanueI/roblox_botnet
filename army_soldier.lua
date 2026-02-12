@@ -507,6 +507,10 @@ local function createPanel()
                     clickConnection = Mouse.Button1Down:Connect(function()
                         if Mouse.Hit then
                             local targetPos = Mouse.Hit.Position
+                            -- Stop following when walking specifically
+                            sendCommand("stop_follow") 
+                            task.wait(0.1)
+                            
                             local gotoCmd = string.format("goto %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
                             sendCommand(gotoCmd)
                             sendNotify("Goto", "Soldiers walking to location")
@@ -1181,6 +1185,7 @@ task.spawn(function()
                         
                         -- Execute commands
                         if string.sub(action, 1, 5) == "bring" then
+                            stopFollowing() -- Stop follow to prevent conflict
                             local coords = string.split(string.sub(action, 7), ",")
                             if #coords == 3 then
                                 local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
@@ -1211,6 +1216,7 @@ task.spawn(function()
                             
                         elseif string.sub(action, 1, 4) == "goto" then
                             if not isCommander then
+                                stopFollowing() -- Stop follow to prevent conflict
                                 local coords = string.split(string.sub(action, 6), ",")
                                 if #coords == 3 then
                                     local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
