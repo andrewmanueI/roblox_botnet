@@ -14,6 +14,7 @@ const clients = new Map(); // clientId -> { id, registeredAt, lastSeen, lastComm
 const crypto = require('crypto');
 const commandHistory = new Map(); // commandId -> { id, action, time, type, executedBy }
 const MAX_HISTORY = 100;
+let impulseTimer = null;
 
 const generateClientId = () => {
     return crypto.randomUUID();
