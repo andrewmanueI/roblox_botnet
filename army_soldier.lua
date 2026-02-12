@@ -647,12 +647,16 @@ local function createPanel()
                 Text = "Goto Mouse (Walk)",
                 Color = Color3.fromRGB(100, 200, 255),
                 Callback = function()
+                    local LocalPlayer = game:GetService("Players").LocalPlayer
+                    local Mouse = LocalPlayer:GetMouse()
+                    
                     sendNotify("Goto Mode", "Click on ground to walk")
 
                     local clickConnection
                     clickConnection = Mouse.Button1Down:Connect(function()
-                        if Mouse.Hit then
-                            local targetPos = Mouse.Hit.Position + Vector3.new(0, 3, 0)
+                        local currentMouse = LocalPlayer:GetMouse() -- Redefine again inside
+                        if currentMouse.Hit then
+                            local targetPos = currentMouse.Hit.Position + Vector3.new(0, 3, 0)
                             local gotoCmd = string.format("goto %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
                             
                             -- LOCAL EXECUTION for Commander (Reason check)
