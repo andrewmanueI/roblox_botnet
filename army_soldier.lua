@@ -647,20 +647,25 @@ local function createPanel()
                 Text = "Goto Mouse (Walk)",
                 Color = Color3.fromRGB(100, 200, 255),
                 Callback = function()
-                    sendNotify("Goto Mode", "Click where you want soldiers to walk")
+                    sendNotify("Goto Mode", "Click on ground to walk")
 
                     local clickConnection
                     clickConnection = Mouse.Button1Down:Connect(function()
                         if Mouse.Hit then
                             local targetPos = Mouse.Hit.Position + Vector3.new(0, 3, 0)
                             local gotoCmd = string.format("goto %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
+                            
+                            -- LOCAL EXECUTION for Commander (Reason check)
+                            if isCommander then
+                                print("[GOTO] Commander local execution to:", targetPos)
+                                startGotoWalk(targetPos)
+                            end
+
                             sendCommand(gotoCmd)
-                            sendNotify("Goto", "Soldiers walking to location")
+                            sendNotify("Goto Executed", "Army walking...")
                             clickConnection:Disconnect()
                         end
                     end)
-
-                    -- Timeout removed per user request
                 end
             },
             {
