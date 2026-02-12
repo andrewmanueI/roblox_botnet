@@ -273,13 +273,17 @@ local function startGotoWalk(targetPos)
             -- Autojump - check if obstacle ahead (only if enabled)
             local charHRP = char:FindFirstChild("HumanoidRootPart")
             if autoJumpEnabled and charHRP and humanoid.Jump then
-                local check1 = workspace:FindPartOnRay(
-                    Ray.new(charHRP.Position - Vector3.new(0, 1.5, 0), charHRP.CFrame.LookVector * 3),
-                    char
+                local rayParams = RaycastParams.new()
+                rayParams.FilterDescendantsInstances = {char}
+                rayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+                local check1 = workspace:Raycast(
+                    charHRP.Position - Vector3.new(0, 1.5, 0), charHRP.CFrame.LookVector * 3,
+                    rayParams
                 )
-                local check2 = workspace:FindPartOnRay(
-                    Ray.new(charHRP.Position + Vector3.new(0, 1.5, 0), charHRP.CFrame.LookVector * 3),
-                    char
+                local check2 = workspace:Raycast(
+                    charHRP.Position + Vector3.new(0, 1.5, 0), charHRP.CFrame.LookVector * 3,
+                    rayParams
                 )
                 if check1 or check2 then
                     humanoid.Jump = true
