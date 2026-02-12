@@ -36,6 +36,7 @@ local isClicking = false
 local followMode = "Normal" -- Normal, Line, Circle, Force
 local movementMode = "Normal" -- Normal, TP-Walk
 local tpWalkConnection = nil
+local gotoConnection = nil
 local moveTarget = nil
 local TP_SPEED = 3
 local VirtualUser = game:GetService("VirtualUser")
@@ -194,6 +195,61 @@ local function clearHighlights(highlights)
     end
 end
 
+local function stopGotoWalk()
+    if gotoConnection then
+        gotoConnection:Disconnect()
+        gotoConnection = nil
+    end
+    moveTarget = nil
+end
+
+local function startGotoWalk(targetPos)
+    stopGotoWalk()
+    stopFollowing()
+    moveTarget = targetPos
+
+    local lastPos = nil
+    local stagnantFrames = 0
+
+    gotoConnection = RunService.Heartbeat:Connect(function()
+        if not moveTarget then stopGotoWalk() return end
+        local char = LocalPlayer.Character
+        local humanoid = char and char:FindFirstChild("Humanoid")
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not humanoid or not hrp then return end
+
+        local currentPos = hrp.Position
+        local diff = moveTarget - currentPos
+        local dist = diff.Magnitude
+
+        -- Stop if reached destination
+        if dist < 2 then
+            stopGotoWalk()
+            return
+        end
+
+        -- Track if character is stuck/not moving
+        if lastPos then
+            local moveDist = (currentPos - lastPos).Magnitude
+            if moveDist < 0.1 then
+                stagnantFrames = stagnantFrames + 1
+            else
+                stagnantFrames = 0
+            end
+
+            -- Stop if stuck for 60 frames (~1 second)
+            if stagnantFrames > 60 then
+                stopGotoWalk()
+                return
+            end
+        end
+        lastPos = currentPos
+
+        -- Keep moving toward target
+        humanoid:MoveTo(moveTarget)
+    end)
+end
+
 local function stopTPWalk()
     if tpWalkConnection then
         tpWalkConnection:Disconnect()
@@ -297,6 +353,7 @@ local function terminateScript()
     isPanelOpen = false
     isCommander = false
     stopFollowing()
+    stopGotoWalk()
 end
 
 
@@ -1014,7 +1071,7 @@ while isRunning do
                                         if movementMode == "TP-Walk" then
                                             startTPWalk(targetPos)
                                         else
-                                            humanoid:MoveTo(targetPos)
+                                            startGotoWalk(targetPos)
                                         end
                                     end
                                 end
