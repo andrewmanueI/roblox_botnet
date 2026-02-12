@@ -204,9 +204,10 @@ local function startGotoWalk(targetPos)
     stopGotoWalk()
     stopFollowing()
     moveTarget = targetPos
+    print("[GOTO] Starting - target:", moveTarget)
 
     gotoConnection = RunService.Heartbeat:Connect(function()
-        if not moveTarget then stopGotoWalk() return end
+        if not moveTarget then print("[GOTO] moveTarget is nil"); stopGotoWalk(); return end
         local char = LocalPlayer.Character
         local humanoid = char and char:FindFirstChild("Humanoid")
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -218,6 +219,7 @@ local function startGotoWalk(targetPos)
 
         -- Stop if reached destination
         if dist < 1 then
+            print("[GOTO] Reached destination")
             stopGotoWalk()
             return
         end
