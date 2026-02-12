@@ -208,8 +208,15 @@ local function startGotoWalk(targetPos)
     stopFollowing()
     
     local char = LocalPlayer.Character
-    if char and char:FindFirstChildOfClass("Humanoid") then
-        char:FindFirstChildOfClass("Humanoid"):MoveTo(targetPos)
+    if char then
+        local humanoid = char:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            if humanoid.SeatPart then
+                humanoid.Sit = false
+                task.wait(0.1)
+            end
+            humanoid.WalkToPoint = targetPos
+        end
     end
 end
 
