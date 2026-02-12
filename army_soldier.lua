@@ -37,8 +37,6 @@ local followMode = "Normal" -- Normal, Line, Circle, Force
 local gotoConnection = nil
 local moveTarget = nil
 local VirtualUser = game:GetService("VirtualUser")
-local followPosConnection = nil
-local followPosTarget = nil
 local gotoDummy = nil
 local gotoDummyConnection = nil
 local autoJumpEnabled = true
@@ -354,52 +352,8 @@ local function stopFollowing()
     followTargetUserId = nil
 end
 
-local function startFollowingPosition(targetPos, mode)
-    stopFollowingPosition()
-    stopFollowing()
-    followPosTarget = targetPos
-
-    local followStyle = mode or "Normal"
-
-    followPosConnection = RunService.Heartbeat:Connect(function()
-        if not followPosTarget then return end
-        local char = LocalPlayer.Character
-        if not char then return end
-
-        local humanoid = char:FindFirstChildOfClass("Humanoid")
-        local hrp = char:FindFirstChild("HumanoidRootPart")
-        if not humanoid or not hrp then return end
-
-        local currentPos = hrp.Position
-        local dist = (followPosTarget - currentPos).Magnitude
-
-        -- Stop if reached destination
-        if dist < 1 then
-            stopFollowingPosition()
-            return
-        end
-
-        if followStyle == "Force" then
-            local tweenInfo = TweenInfo.new(0.1, Enum.EasingStyle.Linear)
-            TweenService:Create(hrp, tweenInfo, {CFrame = CFrame.new(followPosTarget)}):Play()
-            hrp.Velocity = Vector3.new(0,0,0)
-        elseif followStyle == "Circle" then
-            local angle = math.rad((os.time() * 50 + LocalPlayer.UserId) % 360)
-            local radius = 5
-            local offset = Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
-            humanoid:MoveTo(followPosTarget + offset)
-        else
-            humanoid:MoveTo(followPosTarget)
-        end
-    end)
-end
-
 local function stopFollowingPosition()
-    if followPosConnection then
-        followPosConnection:Disconnect()
-        followPosConnection = nil
-    end
-    followPosTarget = nil
+    -- Removed
 end
 
 local function terminateScript()
@@ -415,7 +369,6 @@ local function terminateScript()
     isPanelOpen = false
     isCommander = false
     stopFollowing()
-    stopFollowingPosition()
     stopGotoWalk()
 end
 
@@ -856,26 +809,6 @@ local function createPanel()
                 end
             },
             {
-                Text = "Follow Position",
-                Color = Color3.fromRGB(150, 255, 150),
-                Callback = function()
-                    sendNotify("Follow Mode", "Click on ground to follow position")
-
-                    local clickConnection
-                    clickConnection = Mouse.Button1Down:Connect(function()
-                        if Mouse.Hit then
-                            local targetPos = Mouse.Hit.Position + Vector3.new(0, 3, 0)
-                            local followCmd = string.format("follow_pos %.2f,%.2f,%.2f %s", targetPos.X, targetPos.Y, targetPos.Z, followMode or "Normal")
-                            sendCommand(followCmd)
-                            sendNotify("Following", "Position (" .. (followMode or "Normal") .. ")")
-                            clickConnection:Disconnect()
-                        end
-                    end)
-
-                    -- Timeout removed per user request
-                end
-            },
-            {
                 Text = "Stop Following",
                 Color = Color3.fromRGB(255, 100, 100),
                 Callback = function()
@@ -1133,14 +1066,6 @@ while isRunning do
                                 local args = string.split(string.sub(action, 8), " ")
                                 local userId = tonumber(args[1])
                                 if userId then startFollowing(userId, args[2]) end
-                            elseif string.sub(action, 1, 10) == "follow_pos" then
-                                local args = string.split(string.sub(action, 12), " ")
-                                local coords = string.split(args[1], ",")
-                                if #coords == 3 then
-                                    local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
-                                    local mode = args[2] or "Normal"
-                                    startFollowingPosition(targetPos, mode)
-                                end
                             elseif action == "stop_follow" then
                                 stopFollowing()
                             elseif string.sub(action, 1, 15) == "set_autojump " then
