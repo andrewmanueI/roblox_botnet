@@ -658,22 +658,22 @@ local function createPanel()
                 Color = Color3.fromRGB(100, 200, 255),
                 Callback = function()
                     sendNotify("Goto Mode", "Click where you want soldiers to walk")
-                    
+
                     local clickConnection
                     clickConnection = Mouse.Button1Down:Connect(function()
                         if Mouse.Hit then
                             local targetPos = Mouse.Hit.Position
                             -- Stop following when walking specifically
-                            sendCommand("stop_follow") 
-                            task.wait(0.1)
-                            
+                            sendCommand("stop_follow")
+                            task.wait(0.5)
+
                             local gotoCmd = string.format("goto %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
                             sendCommand(gotoCmd)
                             sendNotify("Goto", "Soldiers walking to location")
                             clickConnection:Disconnect()
                         end
                     end)
-                    
+
                     -- Timeout removed per user request
                 end
             },
