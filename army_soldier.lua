@@ -960,7 +960,7 @@ while isRunning do
                     currentPollRate = MIN_POLL_RATE
 
                     task.spawn(function()
-                        if action ~= "wait" then
+                        if action ~= "wait" and not isCommander then
                             sendNotify("New Order", action)
 
                             local execResult, execError = pcall(function()
