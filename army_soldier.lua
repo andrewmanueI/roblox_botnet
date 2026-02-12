@@ -207,7 +207,7 @@ local function startGotoWalk(targetPos)
     stopGotoWalk()
     stopFollowing()
     
-    local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    local char = game.Players.LocalPlayer.Character or game.Players.LocalPlayer.CharacterAdded:Wait()
     local humanoid = char:WaitForChild("Humanoid")
 
     if humanoid.SeatPart then
@@ -940,69 +940,71 @@ while isRunning do
                     consecutiveNoChange = 0
                     currentPollRate = MIN_POLL_RATE
 
-                    if action ~= "wait" then
-                        sendNotify("New Order", action)
+                    task.spawn(function()
+                        if action ~= "wait" then
+                            sendNotify("New Order", action)
 
-                        local execResult, execError = pcall(function()
-                            if string.sub(action, 1, 5) == "bring" then
-                                stopFollowing()
-                                local coords = string.split(string.sub(action, 7), ",") -- Fixed index
-                                if #coords == 3 then
-                                    local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
-                                    local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-                                    if hrp then
-                                        local distance = (hrp.Position - targetPos).Magnitude
-                                        local tweenSpeed = math.max(distance / 50, 1)
-                                        TweenService:Create(hrp, TweenInfo.new(tweenSpeed, Enum.EasingStyle.Linear), {
-                                            CFrame = CFrame.new(targetPos + Vector3.new(math.random(-3, 3), 1, math.random(-3, 3)))
-                                        }):Play()
+                            local execResult, execError = pcall(function()
+                                if string.sub(action, 1, 5) == "bring" then
+                                    stopFollowing()
+                                    local coords = string.split(string.sub(action, 7), ",") -- Fixed index
+                                    if #coords == 3 then
+                                        local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
+                                        local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                                        if hrp then
+                                            local distance = (hrp.Position - targetPos).Magnitude
+                                            local tweenSpeed = math.max(distance / 50, 1)
+                                            TweenService:Create(hrp, TweenInfo.new(tweenSpeed, Enum.EasingStyle.Linear), {
+                                                CFrame = CFrame.new(targetPos + Vector3.new(math.random(-3, 3), 1, math.random(-3, 3)))
+                                            }):Play()
+                                        end
+                                    end
+                                elseif string.sub(action, 1, 4) == "goto" then
+                                    print("[GOTO] Received command:", action)
+                                    stopFollowing()
+                                    local coords = string.split(string.sub(action, 6), ",") -- Fixed index
+                                    print("[GOTO] Coords:", coords[1], coords[2], coords[3])
+                                    if #coords == 3 then
+                                        local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
+                                        print("[GOTO] Target pos:", targetPos)
+                                        startGotoWalk(targetPos)
+                                    end
+                                elseif action == "jump" then
+                                    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+                                        LocalPlayer.Character.Humanoid.Jump = true
+                                    end
+                                elseif string.sub(action, 1, 11) == "join_server" then
+                                    local args = string.split(string.sub(action, 13), " ")
+                                    if #args == 2 then
+                                        game:GetService("TeleportService"):TeleportToPlaceInstance(tonumber(args[1]), args[2], LocalPlayer)
+                                    end
+                                elseif action == "reset" then
+                                    if LocalPlayer.Character then LocalPlayer.Character:BreakJoints() end
+                                elseif string.sub(action, 1, 6) == "follow" then
+                                    local args = string.split(string.sub(action, 8), " ")
+                                    local userId = tonumber(args[1])
+                                    if userId then startFollowing(userId, args[2]) end
+                                elseif action == "stop_follow" then
+                                    stopFollowing()
+                                elseif string.sub(action, 1, 15) == "set_autojump " then
+                                    local enabledStr = string.sub(action, 16)
+                                    autoJumpEnabled = (enabledStr == "true")
+                                elseif action == "reload" then
+                                    terminateScript()
+                                    loadstring(game:HttpGet(RELOAD_URL .. "?t=" .. os.time()))()
+                                    return -- Stop this thread
+                                elseif action == "rejoin" then
+                                    game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
+                                elseif string.sub(action, 1, 6) == "voodoo" then
+                                    local coords = string.split(string.sub(action, 8), ",")
+                                    if #coords == 3 then
+                                        fireVoodoo(Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3])))
                                     end
                                 end
-                            elseif string.sub(action, 1, 4) == "goto" then
-                                print("[GOTO] Received command:", action)
-                                stopFollowing()
-                                local coords = string.split(string.sub(action, 6), ",") -- Fixed index
-                                print("[GOTO] Coords:", coords[1], coords[2], coords[3])
-                                if #coords == 3 then
-                                    local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
-                                    print("[GOTO] Target pos:", targetPos)
-                                    startGotoWalk(targetPos)
-                                end
-                            elseif action == "jump" then
-                                if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
-                                    LocalPlayer.Character.Humanoid.Jump = true
-                                end
-                            elseif string.sub(action, 1, 11) == "join_server" then
-                                local args = string.split(string.sub(action, 13), " ")
-                                if #args == 2 then
-                                    game:GetService("TeleportService"):TeleportToPlaceInstance(tonumber(args[1]), args[2], LocalPlayer)
-                                end
-                            elseif action == "reset" then
-                                if LocalPlayer.Character then LocalPlayer.Character:BreakJoints() end
-                            elseif string.sub(action, 1, 6) == "follow" then
-                                local args = string.split(string.sub(action, 8), " ")
-                                local userId = tonumber(args[1])
-                                if userId then startFollowing(userId, args[2]) end
-                            elseif action == "stop_follow" then
-                                stopFollowing()
-                            elseif string.sub(action, 1, 15) == "set_autojump " then
-                                local enabledStr = string.sub(action, 16)
-                                autoJumpEnabled = (enabledStr == "true")
-                            elseif action == "reload" then
-                                terminateScript()
-                                loadstring(game:HttpGet(RELOAD_URL .. "?t=" .. os.time()))()
-                                return -- Stop this thread
-                            elseif action == "rejoin" then
-                                game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
-                            elseif string.sub(action, 1, 6) == "voodoo" then
-                                local coords = string.split(string.sub(action, 8), ",")
-                                if #coords == 3 then
-                                    fireVoodoo(Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3])))
-                                end
-                            end
-                        end)
-                        acknowledgeCommand(commandId, execResult, execError)
-                    end
+                            end)
+                            acknowledgeCommand(commandId, execResult, execError)
+                        end
+                    end)
                 end
             end
         end
