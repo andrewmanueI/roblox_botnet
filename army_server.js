@@ -29,7 +29,7 @@ const updateCommand = (action, source) => {
         id: commandSeq,
         action,
         time: Date.now(),
-        type: [...IMPULSES].some(imp => action.startsWith(imp)) ? 'impulse' : 'persistent',
+        type: (action === 'wait') ? 'persistent' : 'impulse',
         executedBy: []
     };
 
@@ -52,8 +52,8 @@ const updateCommand = (action, source) => {
     const isImpulse = command.type === 'impulse';
     if (isImpulse) {
         const currentId = latestCommand.id;
-        // Very short timeout for reload (0.5s), normal for others (5s)
-        const timeout = action === 'reload' ? 500 : 5000;
+        // All impulses now clear in 0.5s
+        const timeout = 500;
         console.log(`[TIMER] Impulse detected. Clearing in ${timeout}ms: ${action}`);
         impulseTimer = setTimeout(() => {
             if (latestCommand.id === currentId) {
