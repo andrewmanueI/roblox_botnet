@@ -483,6 +483,7 @@ local function createHolographicCubes(position)
     cube.Position = position
     cube.Anchored = true
     cube.CanCollide = false
+    cube.CanQuery = false -- Ignore raycasts so Mouse.Hit doesn't detect it
     cube.Transparency = 0.7
     cube.Color = Color3.fromRGB(0, 255, 255) -- Cyan
     cube.Material = Enum.Material.Neon
