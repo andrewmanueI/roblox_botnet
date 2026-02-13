@@ -380,20 +380,23 @@ const server = http.createServer((req, res) => {
                 
                 // Handle formation commands specially
                 if (newAction.startsWith('formation_follow ')) {
-                    // Format: formation_follow <userId> <shape>
+                    // Format: formation_follow <userId> <shape> <offsets_json>
+                    // Offsets are now calculated by commander and sent to server
                     const parts = newAction.split(' ');
-                    if (parts.length >= 3) {
+                    if (parts.length >= 4) {
                         formationState.active = true;
                         formationState.mode = "Follow";
                         formationState.leaderId = parts[1];
                         formationState.shape = parts[2];
                         formationState.center = null;
-                        assignFormationPositions();
+                        
+                        // Offsets are already calculated by commander
+                        const offsetsJson = parts[3];
                         
                         console.log(`[FORMATION] Follow mode: ${formationState.shape} around user ${formationState.leaderId}`);
-                        console.log(`[FORMATION] Assigned positions for ${formationState.assignments.size} clients`);
+                        console.log(`[FORMATION] Using commander-calculated offsets`);
                         
-                        // Broadcast formation to all clients with their assigned indices
+                        // Broadcast formation to all clients
                         if (!updateCommand(newAction, "HTTP")) {
                             res.writeHead(400);
                             res.end("Missing command");

@@ -40,12 +40,33 @@ local VirtualUser = game:GetService("VirtualUser")
 local gotoDummy = nil
 local gotoDummyConnection = nil
 local autoJumpEnabled = false
+local autoJumpForceCount = 0 -- temporary override while slide/walk movement is active
+
+local function isAutoJumpActive()
+    return autoJumpEnabled or (autoJumpForceCount > 0)
+end
+
+local function beginForceAutoJump()
+    autoJumpForceCount = autoJumpForceCount + 1
+end
+
+local function endForceAutoJump()
+    autoJumpForceCount = math.max(0, autoJumpForceCount - 1)
+end
 local gotoWalkToken = 0 -- increments to cancel any active goto walk loop
 local debugFollowCommands = false -- When true, commander will also execute server commands.
 local pendingMouseClickConnection = nil -- used for click-to-target modes; cancel should close it
 local pendingMouseClickCleanup = nil -- optional cleanup for pending click mode (e.g. clear highlights)
 local CANCEL_COOLDOWN = 0.35 -- seconds; prevents spamming cancel key
 local lastCancelTime = 0
+
+-- Goto/tp-walk tuning
+local GOTO_STOP_DISTANCE = 0.5 -- studs; stop when we're closer than this
+local GOTO_TPWALK_SPEED = 2 -- base speed scalar for TranslateBy loop
+local GOTO_TPWALK_SCALE = 10 -- multiplies (speed * delta) for TranslateBy loop
+local GOTO_STUCK_TIME = 0.35 -- seconds before enabling MoveTo fallback
+local GOTO_STUCK_EPS = 0.01 -- studs; if we move less than this, consider "stuck"
+local WALKTO_REFRESH = 0.2 -- seconds; refresh MoveTo periodically
 
 -- Formation state
 local formationMode = "Follow" -- "Follow" or "Goto"
@@ -55,6 +76,7 @@ local formationIndex = nil -- This client's assigned index in formation
 local formationActive = false
 local formationLeaderId = nil
 local formationCenter = nil
+local formationOffsets = nil -- Map of userId -> {x, y, z} relative offsets
 
 
 -- Background autojump loop: runs continuously and checks `autoJumpEnabled`.
@@ -64,7 +86,7 @@ task.spawn(function()
     while isRunning do
         rs:Wait()
 
-        if autoJumpEnabled then
+        if isAutoJumpActive() then
             local char = LocalPlayer.Character
             local hum = char and char:FindFirstChildOfClass("Humanoid")
             if hum and hum.Health > 0 and hum.Parent and not hum.SeatPart then
@@ -290,7 +312,121 @@ stopGotoWalk = function()
     moveTarget = nil
 end
 
-local function startGotoWalk(targetPos)
+-- Centralized movement helpers so actions (tween/slide/walk/formation) reuse the same codepaths.
+local activeMoveTween = nil
+local activeFollowTween = nil
+
+local function stopMoveTween()
+    local t = activeMoveTween
+    activeMoveTween = nil
+    if t then
+        pcall(function() t:Cancel() end)
+    end
+end
+
+local function stopFollowTween()
+    local t = activeFollowTween
+    activeFollowTween = nil
+    if t then
+        pcall(function() t:Cancel() end)
+    end
+end
+
+local function getMyRig()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not (humanoid and root) then return nil end
+    return char, humanoid, root
+end
+
+local function ensureUnseated(humanoid)
+    if humanoid and humanoid.SeatPart then
+        humanoid.Sit = false
+    end
+end
+
+local function shouldStopGoto(dist)
+    return dist < GOTO_STOP_DISTANCE
+end
+
+-- Forward declarations so Movement methods can call these without accidental global lookups.
+local startGotoWalk, startGotoWalkMoveTo
+
+local Movement = {}
+
+function Movement.cancelAll(isFromCommander)
+    -- Reuse the existing cancel behavior, but also stop any active tween we started.
+    stopMoveTween()
+    stopFollowTween()
+    cancelCurrentOrder(isFromCommander)
+end
+
+function Movement.slideTo(targetPos)
+    -- "Slide" in this script is the tp-walk TranslateBy loop.
+    startGotoWalk(targetPos)
+end
+
+function Movement.walkTo(targetPos)
+    startGotoWalkMoveTo(targetPos)
+end
+
+function Movement.tweenTo(targetPos, opts)
+    -- Tween the HRP to a target position; used by "bring/force goto" style commands.
+    local _, humanoid, root = getMyRig()
+    if not (humanoid and root) then return end
+
+    ensureUnseated(humanoid)
+
+    local distance = (root.Position - targetPos).Magnitude
+    local speedDiv = (opts and opts.speedDiv) or 50
+    local minTime = (opts and opts.minTime) or 1
+    local rand = (opts and opts.randomRadius) or 0
+    local yOff = (opts and opts.yOffset) or 0
+
+    local goalPos = targetPos
+    if rand and rand > 0 then
+        goalPos = goalPos + Vector3.new(math.random(-rand, rand), yOff, math.random(-rand, rand))
+    elseif yOff ~= 0 then
+        goalPos = goalPos + Vector3.new(0, yOff, 0)
+    end
+
+    local tweenTime = math.max(distance / speedDiv, minTime)
+    stopMoveTween()
+    activeMoveTween = TweenService:Create(root, TweenInfo.new(tweenTime, Enum.EasingStyle.Linear), {
+        CFrame = CFrame.new(goalPos)
+    })
+    activeMoveTween:Play()
+end
+
+function Movement.moveTo(targetPos)
+    local _, humanoid = getMyRig()
+    if not humanoid then return end
+    ensureUnseated(humanoid)
+    pcall(function()
+        humanoid:MoveTo(targetPos)
+    end)
+end
+
+function Movement.followForceStepTo(targetPos, opts)
+    local _, humanoid, root = getMyRig()
+    if not (humanoid and root) then return end
+
+    ensureUnseated(humanoid)
+
+    local t = (opts and opts.time) or 0.1
+    stopFollowTween()
+    activeFollowTween = TweenService:Create(root, TweenInfo.new(t, Enum.EasingStyle.Linear), {
+        CFrame = CFrame.new(targetPos)
+    })
+    activeFollowTween:Play()
+
+    -- Match previous behavior: kill velocity so we don't drift.
+    root.Velocity = Vector3.new(0, 0, 0)
+end
+
+startGotoWalk = function(targetPos)
     stopGotoWalk()
     stopFollowing()
     
@@ -303,74 +439,95 @@ local function startGotoWalk(targetPos)
     end
 
     moveTarget = targetPos
-    
-    local speed = 2 -- Upgraded speed
 
     -- Mirror the proven working logic in `test_walk.lua`: Heartbeat:Wait() + TranslateBy.
     -- This is also more robust than relying on the Heartbeat Connect(dt) arg existing.
     local myToken = gotoWalkToken
+    beginForceAutoJump()
     task.spawn(function()
-        local lastPos = nil
-        local stuckTime = 0
-        while isRunning and myToken == gotoWalkToken do
-            local delta = RunService.Heartbeat:Wait()
+        local didCleanup = false
+        local function cleanup()
+            if didCleanup then return end
+            didCleanup = true
+            endForceAutoJump()
+        end
 
-            local myChar = LocalPlayer.Character
-            local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-            local myHumanoid = myChar and myChar:FindFirstChildOfClass("Humanoid")
+        local ok, err = pcall(function()
+            local lastPos = nil
+            local stuckTime = 0
+            while isRunning and myToken == gotoWalkToken do
+                local delta = RunService.Heartbeat:Wait()
 
-            if not (myChar and myRoot and myHumanoid) then
-                lastPos = nil
-                stuckTime = 0
-            else
-                -- If something seats us mid-walk, unseat so movement can resume.
-                if myHumanoid.SeatPart then
-                    myHumanoid.Sit = false
-                end
+                local myChar = LocalPlayer.Character
+                local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+                local myHumanoid = myChar and myChar:FindFirstChildOfClass("Humanoid")
 
-                local offset = (targetPos - myRoot.Position)
-                local dist = offset.Magnitude
-                if dist < 1.5 then
-                    stopGotoWalk()
-                    break
-                end
-
-                if dist > 1e-6 then
-                    local direction = offset.Unit
-
-                    -- Primary: tp-walk style TranslateBy
-                    local ok, err = pcall(function()
-                        myChar:TranslateBy(direction * speed * delta * 10)
-                    end)
-                    if not ok then
-                        warn("[GOTO] TranslateBy error:", err)
+                if not (myChar and myRoot and myHumanoid) then
+                    lastPos = nil
+                    stuckTime = 0
+                else
+                    -- If something seats us mid-walk, unseat so movement can resume.
+                    if myHumanoid.SeatPart then
+                        myHumanoid.Sit = false
                     end
 
-                    -- Detect "stuck" (position not changing) and fall back to Humanoid MoveTo.
-                    if lastPos then
-                        local moved = (myRoot.Position - lastPos).Magnitude
-                        if moved < 0.01 then
-                            stuckTime = stuckTime + delta
-                        else
-                            stuckTime = 0
-                        end
+                    local offset = (targetPos - myRoot.Position)
+                    local dist = offset.Magnitude
+                    if shouldStopGoto(dist) then
+                        stopGotoWalk()
+                        break
                     end
-                    lastPos = myRoot.Position
 
-                    if stuckTime > 0.35 then
-                        -- Fallback movement that works in more games/executors.
+                    if dist > 1e-6 then
+                        local direction = offset.Unit
+
+                        -- Face the target position while sliding (helps the movement look natural).
                         pcall(function()
-                            myHumanoid:MoveTo(targetPos)
-                            myHumanoid:Move(direction, false)
+                            local lookAt = Vector3.new(targetPos.X, myRoot.Position.Y, targetPos.Z)
+                            if (lookAt - myRoot.Position).Magnitude > 1e-3 then
+                                myRoot.CFrame = CFrame.new(myRoot.Position, lookAt)
+                            end
                         end)
+
+                        -- Primary: tp-walk style TranslateBy
+                        local ok2, err2 = pcall(function()
+                            myChar:TranslateBy(direction * GOTO_TPWALK_SPEED * delta * GOTO_TPWALK_SCALE + Vector3.new(0, 0.1, 0))
+                        end)
+                        if not ok2 then
+                            warn("[GOTO] TranslateBy error:", err2)
+                        end
+
+                        -- Detect "stuck" (position not changing) and fall back to Humanoid MoveTo.
+                        if lastPos then
+                            local moved = (myRoot.Position - lastPos).Magnitude
+                            if moved < GOTO_STUCK_EPS then
+                                stuckTime = stuckTime + delta
+                            else
+                                stuckTime = 0
+                            end
+                        end
+                        lastPos = myRoot.Position
+
+                        if stuckTime > GOTO_STUCK_TIME then
+                            -- Fallback movement that works in more games/executors.
+                            pcall(function()
+                                myHumanoid:MoveTo(targetPos)
+                                myHumanoid:Move(direction, false)
+                            end)
+                        end
                     end
                 end
             end
+        end)
+
+        cleanup()
+        if not ok then
+            warn("[GOTO] Slide loop error:", err)
         end
     end)
 end
 
-local function startGotoWalkMoveTo(targetPos)
+startGotoWalkMoveTo = function(targetPos)
     stopGotoWalk()
     stopFollowing()
 
@@ -386,29 +543,44 @@ local function startGotoWalkMoveTo(targetPos)
 
     -- Classic Roblox walking: keep calling MoveTo until we're close enough.
     local myToken = gotoWalkToken
+    beginForceAutoJump()
     task.spawn(function()
-        local lastMoveTo = 0
-        while isRunning and myToken == gotoWalkToken do
-            RunService.Heartbeat:Wait()
+        local didCleanup = false
+        local function cleanup()
+            if didCleanup then return end
+            didCleanup = true
+            endForceAutoJump()
+        end
 
-            local myChar = LocalPlayer.Character
-            local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-            local myHumanoid = myChar and myChar:FindFirstChildOfClass("Humanoid")
-            if myRoot and myHumanoid then
-                local dist = (targetPos - myRoot.Position).Magnitude
-                if dist < 1.5 then
-                    stopGotoWalk()
-                    break
-                end
+        local ok, err = pcall(function()
+            local lastMoveTo = 0
+            while isRunning and myToken == gotoWalkToken do
+                RunService.Heartbeat:Wait()
 
-                -- Some games need MoveTo refreshed periodically.
-                if os.clock() - lastMoveTo > 0.2 then
-                    lastMoveTo = os.clock()
-                    pcall(function()
-                        myHumanoid:MoveTo(targetPos)
-                    end)
+                local myChar = LocalPlayer.Character
+                local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+                local myHumanoid = myChar and myChar:FindFirstChildOfClass("Humanoid")
+                if myRoot and myHumanoid then
+                    local dist = (targetPos - myRoot.Position).Magnitude
+                    if shouldStopGoto(dist) then
+                        stopGotoWalk()
+                        break
+                    end
+
+                    -- Some games need MoveTo refreshed periodically.
+                    if os.clock() - lastMoveTo > WALKTO_REFRESH then
+                        lastMoveTo = os.clock()
+                        pcall(function()
+                            myHumanoid:MoveTo(targetPos)
+                        end)
+                    end
                 end
             end
+        end)
+
+        cleanup()
+        if not ok then
+            warn("[WALKTO] Walk loop error:", err)
         end
     end)
 end
@@ -417,6 +589,7 @@ startFollowing = function(userId, mode)
     if followConnection then
         followConnection:Disconnect()
     end
+    stopFollowTween()
     
     followTargetUserId = userId
     local followStyle = mode or "Normal"
@@ -428,29 +601,34 @@ startFollowing = function(userId, mode)
                 local targetHRP = targetPlayer.Character.HumanoidRootPart
                 local targetPos = targetHRP.Position
                 
-                if followStyle == "Line" then
-                    local index = (LocalPlayer.UserId % 10) + 1
-                    local spacing = 4
-                    local offset = targetHRP.CFrame.LookVector * -1 * (index * spacing + 5)
-                    targetPos = targetPos + offset
-                elseif followStyle == "Circle" then
-                    local angle = math.rad((os.time() * 50 + LocalPlayer.UserId) % 360)
-                    local radius = 15
-                    local offset = Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
-                    targetPos = targetPos + offset
+                -- Use commander-calculated relative offsets if available
+                local myId = clientId or tostring(LocalPlayer.UserId)
+                if formationActive and formationMode == "Follow" and formationOffsets and formationOffsets[myId] then
+                    local offset = formationOffsets[myId]
+                    -- Transform relative offset by leader's CFrame
+                    local relPos = targetHRP.CFrame * Vector3.new(offset.x, offset.y, offset.z)
+                    targetPos = relPos
                 else
-                    targetPos = targetPos + Vector3.new(math.random(-2,2), 0, math.random(-2,2))
+                    -- Fallback to old logic if no offsets provided
+                    if followStyle == "Line" then
+                        local index = (LocalPlayer.UserId % 10) + 1
+                        local spacing = 4
+                        local offset = targetHRP.CFrame.LookVector * -1 * (index * spacing + 5)
+                        targetPos = targetPos + offset
+                    elseif followStyle == "Circle" then
+                        local angle = math.rad((os.time() * 50 + LocalPlayer.UserId) % 360)
+                        local radius = 15
+                        local offset = Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
+                        targetPos = targetPos + offset
+                    else
+                        targetPos = targetPos + Vector3.new(math.random(-2,2), 0, math.random(-2,2))
+                    end
                 end
                 
                 if followStyle == "Force" then
-                    local hrp = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-                    if hrp then
-                        local tweenInfo = TweenInfo.new(0.1, Enum.EasingStyle.Linear)
-                        TweenService:Create(hrp, tweenInfo, {CFrame = CFrame.new(targetPos)}):Play()
-                        hrp.Velocity = Vector3.new(0,0,0)
-                    end
+                    Movement.followForceStepTo(targetPos, { time = 0.1 })
                 else
-                    LocalPlayer.Character.Humanoid:MoveTo(targetPos)
+                    Movement.moveTo(targetPos)
                 end
             end
         end
@@ -462,14 +640,39 @@ stopFollowing = function()
         followConnection:Disconnect()
         followConnection = nil
     end
+    stopFollowTween()
     followTargetUserId = nil
 end
 
-stopFollowingPosition = function()
-    -- Removed
+local function calculateFormationOffsets(shape, count)
+    local offsets = {}
+    
+    if shape == "Line" then
+        -- Column behind leader (3, 6, 9... studs)
+        for i = 0, count - 1 do
+            table.insert(offsets, Vector3.new(0, 0, (i + 1) * 3))
+        end
+    elseif shape == "Row" then
+        -- Rows of 3 behind leader (Row 1 is 3 studs back)
+        local rowSize = 3
+        for i = 0, count - 1 do
+            local row = math.floor(i / rowSize)
+            local col = i % rowSize
+            table.insert(offsets, Vector3.new((col - 1) * 3, 0, (row + 1) * 3))
+        end
+    elseif shape == "Circle" then
+        -- Static ring around leader (size dynamic based on count)
+        local radius = math.max(10, count * 1.5)
+        for i = 0, count - 1 do
+            local angle = (i / count) * math.pi * 2
+            table.insert(offsets, Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius))
+        end
+    end
+    
+    return offsets
 end
 
-local function createHolographicCubes(position, shape, clientCount)
+local function createHolographicCubes(position, shape, clientCount, baseCFrame)
     -- Clear existing cubes
     for _, cube in ipairs(formationHoloCubes) do
         if cube then cube:Destroy() end
@@ -479,30 +682,39 @@ local function createHolographicCubes(position, shape, clientCount)
     -- Calculate positions for each client based on shape
     local positions = {}
     
-    if shape == "Line" then
-        -- Horizontal line
-        for i = 0, clientCount - 1 do
-            local offset = (i - math.floor(clientCount / 2)) * 4
-            table.insert(positions, position + Vector3.new(offset, 3, 0))
+    if baseCFrame then
+        -- Follow mode relative offsets
+        local offsets = calculateFormationOffsets(shape, clientCount)
+        for _, offset in ipairs(offsets) do
+            table.insert(positions, (baseCFrame * offset).Position + Vector3.new(0, 3, 0))
         end
-    elseif shape == "Row" then
-        -- Rows of 3
-        local rowSize = 3
-        for i = 0, clientCount - 1 do
-            local row = math.floor(i / rowSize)
-            local col = i % rowSize
-            table.insert(positions, position + Vector3.new((col - 1) * 4, 3, row * 4))
-        end
-    elseif shape == "Circle" then
-        -- Circle formation
-        local radius = 15
-        for i = 0, clientCount - 1 do
-            local angle = (i / clientCount) * math.pi * 2
-            table.insert(positions, position + Vector3.new(
-                math.cos(angle) * radius,
-                3,
-                math.sin(angle) * radius
-            ))
+    else
+        -- Goto mode absolute positions
+        if shape == "Line" then
+            -- Horizontal line
+            for i = 0, clientCount - 1 do
+                local offset = (i - math.floor(clientCount / 2)) * 4
+                table.insert(positions, position + Vector3.new(offset, 3, 0))
+            end
+        elseif shape == "Row" then
+            -- Rows of 3
+            local rowSize = 3
+            for i = 0, clientCount - 1 do
+                local row = math.floor(i / rowSize)
+                local col = i % rowSize
+                table.insert(positions, position + Vector3.new((col - 1) * 4, 3, row * 4))
+            end
+        elseif shape == "Circle" then
+            -- Circle formation
+            local radius = 15
+            for i = 0, clientCount - 1 do
+                local angle = (i / clientCount) * math.pi * 2
+                table.insert(positions, position + Vector3.new(
+                    math.cos(angle) * radius,
+                    3,
+                    math.sin(angle) * radius
+                ))
+            end
         end
     end
     
@@ -513,7 +725,7 @@ local function createHolographicCubes(position, shape, clientCount)
         cube.Position = pos
         cube.Anchored = true
         cube.CanCollide = false
-        cube.CanQuery = false -- Ignore raycasts so Mouse.Hit doesn't detect it
+        cube.CanQuery = false
         cube.Transparency = 0.7
         cube.Color = Color3.fromRGB(0, 255, 255) -- Cyan
         cube.Material = Enum.Material.Neon
@@ -532,11 +744,9 @@ local function clearHolographicCubes()
     formationHoloCubes = {}
 end
 
-local function updateHolographicCubes(position, shape, clientCount)
-    -- Just recreate all cubes at new position
-    createHolographicCubes(position, shape, clientCount)
+local function updateHolographicCubes(position, shape, clientCount, baseCFrame)
+    createHolographicCubes(position, shape, clientCount, baseCFrame)
 end
-
 
 local function terminateScript()
     isRunning = false
@@ -606,11 +816,49 @@ local function createPanel()
     headerSubtitle.TextSize = 12
     headerSubtitle.Font = Enum.Font.Gotham
     headerSubtitle.TextXAlignment = Enum.TextXAlignment.Left
+
+    -- Top-right gear: switches the panel between "Commands" and "Settings" views.
+    local gearBtn = Instance.new("TextButton", header)
+    gearBtn.Name = "SettingsGear"
+    gearBtn.Size = UDim2.new(0, 28, 0, 28)
+    gearBtn.Position = UDim2.new(1, -38, 0, 16)
+    gearBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
+    gearBtn.BorderSizePixel = 0
+    gearBtn.AutoButtonColor = false
+    gearBtn.Text = "⚙"
+    gearBtn.TextColor3 = Color3.fromRGB(210, 210, 220)
+    gearBtn.TextSize = 16
+    gearBtn.Font = Enum.Font.GothamBold
+
+    local gearCorner = Instance.new("UICorner", gearBtn)
+    gearCorner.CornerRadius = UDim.new(0, 8)
+
+    local gearStroke = Instance.new("UIStroke", gearBtn)
+    gearStroke.Color = Color3.fromRGB(60, 60, 70)
+    gearStroke.Thickness = 1
+    gearStroke.Transparency = 0.6
     
+    -- Fade transition containers (CanvasGroup fades all descendants cleanly).
+    local commandsGroup = Instance.new("CanvasGroup", panel)
+    commandsGroup.Name = "CommandsGroup"
+    commandsGroup.Size = UDim2.new(1, -20, 1, -80)
+    commandsGroup.Position = UDim2.new(0, 10, 0, 70)
+    commandsGroup.BackgroundTransparency = 1
+    commandsGroup.Visible = true
+    commandsGroup.GroupTransparency = 0
+
+    local settingsGroup = Instance.new("CanvasGroup", panel)
+    settingsGroup.Name = "SettingsGroup"
+    settingsGroup.Size = UDim2.new(1, -20, 1, -80)
+    settingsGroup.Position = UDim2.new(0, 10, 0, 70)
+    settingsGroup.BackgroundTransparency = 1
+    settingsGroup.Visible = false
+    settingsGroup.GroupTransparency = 1
+
     -- Commands Container
-    local commandsContainer = Instance.new("ScrollingFrame", panel)
-    commandsContainer.Size = UDim2.new(1, -20, 1, -80)
-    commandsContainer.Position = UDim2.new(0, 10, 0, 70)
+    local commandsContainer = Instance.new("ScrollingFrame", commandsGroup)
+    commandsContainer.Size = UDim2.new(1, 0, 1, 0)
+    commandsContainer.Position = UDim2.new(0, 0, 0, 0)
     commandsContainer.BackgroundTransparency = 1
     commandsContainer.BorderSizePixel = 0
     commandsContainer.ScrollBarThickness = 4
@@ -621,6 +869,187 @@ local function createPanel()
     local commandsList = Instance.new("UIListLayout", commandsContainer)
     commandsList.SortOrder = Enum.SortOrder.LayoutOrder
     commandsList.Padding = UDim.new(0, 8)
+
+    -- Settings view (fades in/out; contains modern toggle switches).
+    local settingsScroll = Instance.new("ScrollingFrame", settingsGroup)
+    settingsScroll.Size = UDim2.new(1, 0, 1, 0)
+    settingsScroll.Position = UDim2.new(0, 0, 0, 0)
+    settingsScroll.BackgroundTransparency = 1
+    settingsScroll.BorderSizePixel = 0
+    settingsScroll.ScrollBarThickness = 4
+    settingsScroll.ScrollBarImageColor3 = Color3.fromRGB(100, 100, 110)
+    settingsScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    settingsScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+
+    local settingsList = Instance.new("UIListLayout", settingsScroll)
+    settingsList.SortOrder = Enum.SortOrder.LayoutOrder
+    settingsList.Padding = UDim.new(0, 10)
+
+    local function createToggleCard(titleText, descText, getValue, setValue)
+        local card = Instance.new("Frame", settingsScroll)
+        card.Size = UDim2.new(1, 0, 0, 72)
+        card.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
+        card.BorderSizePixel = 0
+
+        local cardCorner = Instance.new("UICorner", card)
+        cardCorner.CornerRadius = UDim.new(0, 10)
+
+        local cardStroke = Instance.new("UIStroke", card)
+        cardStroke.Color = Color3.fromRGB(55, 55, 65)
+        cardStroke.Thickness = 1
+        cardStroke.Transparency = 0.7
+
+        local title = Instance.new("TextLabel", card)
+        title.Size = UDim2.new(1, -90, 0, 20)
+        title.Position = UDim2.new(0, 14, 0, 12)
+        title.BackgroundTransparency = 1
+        title.Text = titleText
+        title.TextColor3 = Color3.fromRGB(255, 255, 255)
+        title.TextSize = 14
+        title.Font = Enum.Font.GothamBold
+        title.TextXAlignment = Enum.TextXAlignment.Left
+
+        local desc = Instance.new("TextLabel", card)
+        desc.Size = UDim2.new(1, -90, 0, 16)
+        desc.Position = UDim2.new(0, 14, 0, 34)
+        desc.BackgroundTransparency = 1
+        desc.Text = descText
+        desc.TextColor3 = Color3.fromRGB(150, 150, 160)
+        desc.TextSize = 11
+        desc.Font = Enum.Font.Gotham
+        desc.TextXAlignment = Enum.TextXAlignment.Left
+
+        local switch = Instance.new("TextButton", card)
+        switch.Name = "Switch"
+        switch.Size = UDim2.new(0, 56, 0, 28)
+        switch.Position = UDim2.new(1, -70, 0.5, -14)
+        switch.BorderSizePixel = 0
+        switch.AutoButtonColor = false
+        switch.Text = ""
+
+        local switchCorner = Instance.new("UICorner", switch)
+        switchCorner.CornerRadius = UDim.new(0, 14)
+
+        local knob = Instance.new("Frame", switch)
+        knob.Name = "Knob"
+        knob.Size = UDim2.new(0, 22, 0, 22)
+        knob.Position = UDim2.new(0, 3, 0, 3)
+        knob.BackgroundColor3 = Color3.fromRGB(245, 245, 250)
+        knob.BorderSizePixel = 0
+
+        local knobCorner = Instance.new("UICorner", knob)
+        knobCorner.CornerRadius = UDim.new(0, 11)
+
+        local function apply(v, instant)
+            local onColor = Color3.fromRGB(100, 255, 150)
+            local offColor = Color3.fromRGB(65, 65, 75)
+            local knobOnPos = UDim2.new(0, 31, 0, 3)
+            local knobOffPos = UDim2.new(0, 3, 0, 3)
+
+            if instant then
+                switch.BackgroundColor3 = v and onColor or offColor
+                knob.Position = v and knobOnPos or knobOffPos
+            else
+                TweenService:Create(switch, TweenInfo.new(0.18, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+                    BackgroundColor3 = v and onColor or offColor
+                }):Play()
+                TweenService:Create(knob, TweenInfo.new(0.18, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+                    Position = v and knobOnPos or knobOffPos
+                }):Play()
+            end
+        end
+
+        apply(getValue(), true)
+
+        switch.MouseButton1Click:Connect(function()
+            local newVal = not getValue()
+            setValue(newVal)
+            apply(newVal, false)
+        end)
+
+        local clickLayer = Instance.new("TextButton", card)
+        clickLayer.Name = "ClickLayer"
+        clickLayer.Size = UDim2.new(1, 0, 1, 0)
+        clickLayer.BackgroundTransparency = 1
+        clickLayer.Text = ""
+        clickLayer.AutoButtonColor = false
+        clickLayer.ZIndex = 1
+        clickLayer.MouseButton1Click:Connect(function()
+            local newVal = not getValue()
+            setValue(newVal)
+            apply(newVal, false)
+        end)
+
+        -- Ensure the switch stays clickable above the click layer.
+        switch.ZIndex = 5
+        knob.ZIndex = 6
+        title.ZIndex = 2
+        desc.ZIndex = 2
+
+        return {
+            Set = function(v) apply(v, false) end
+        }
+    end
+
+    local autoJumpToggle = createToggleCard(
+        "Auto Jump",
+        "Automatically jump over low obstacles while moving.",
+        function() return autoJumpEnabled end,
+        function(v)
+            autoJumpEnabled = v
+            sendCommand("set_autojump " .. tostring(autoJumpEnabled))
+        end
+    )
+
+    local debugToggle = createToggleCard(
+        "Debug Follow",
+        "Commander also executes server commands (for testing).",
+        function() return debugFollowCommands end,
+        function(v)
+            debugFollowCommands = v
+        end
+    )
+
+    local isSettingsOpen = false
+    local function setSettingsOpen(open)
+        if open == isSettingsOpen then return end
+        isSettingsOpen = open
+
+        if isSettingsOpen then
+            settingsGroup.Visible = true
+            headerTitle.Text = "SETTINGS"
+            headerSubtitle.Text = "Preferences"
+
+            autoJumpToggle.Set(autoJumpEnabled)
+            debugToggle.Set(debugFollowCommands)
+
+            -- Instant transition (no animation).
+            settingsGroup.GroupTransparency = 0
+            commandsGroup.GroupTransparency = 1
+            commandsGroup.Visible = false
+        else
+            headerTitle.Text = "ARMY CONTROL"
+            headerSubtitle.Text = "Commander Mode"
+
+            commandsGroup.Visible = true
+            -- Instant transition (no animation).
+            commandsGroup.GroupTransparency = 0
+            settingsGroup.GroupTransparency = 1
+            settingsGroup.Visible = false
+        end
+    end
+
+    gearBtn.MouseEnter:Connect(function()
+        TweenService:Create(gearBtn, TweenInfo.new(0.15), { BackgroundColor3 = Color3.fromRGB(45, 45, 55) }):Play()
+        TweenService:Create(gearStroke, TweenInfo.new(0.15), { Transparency = 0.3 }):Play()
+    end)
+    gearBtn.MouseLeave:Connect(function()
+        TweenService:Create(gearBtn, TweenInfo.new(0.15), { BackgroundColor3 = Color3.fromRGB(35, 35, 42) }):Play()
+        TweenService:Create(gearStroke, TweenInfo.new(0.15), { Transparency = 0.6 }):Play()
+    end)
+    gearBtn.MouseButton1Click:Connect(function()
+        setSettingsOpen(not isSettingsOpen)
+    end)
     
     -- Helper function to create command buttons
     local function createButton(config)
@@ -948,7 +1377,7 @@ local function createPanel()
     
     -- Follow Drawer
     local followDrawer = createDrawer({
-        Title = "Follow Actions",
+        Title = "Follow",
         Description = "Manage following behavior",
         Icon = "👤",
         Color = Color3.fromRGB(255, 200, 100),
@@ -1017,10 +1446,10 @@ local function createPanel()
         }
     })
     
-    -- Server Actions Drawer
+    -- Accounts Drawer (Server Actions + System)
     local serverDrawer = createDrawer({
-        Title = "Server Actions",
-        Description = "Manage server connections",
+        Title = "Accounts",
+        Description = "Server and script controls",
         Icon = "🌐",
         Color = Color3.fromRGB(150, 120, 255),
         Buttons = {
@@ -1039,6 +1468,22 @@ local function createPanel()
                 Callback = function()
                     sendCommand("rejoin")
                     sendNotify("Command", "Rejoin executed")
+                end
+            },
+            {
+                Text = "Reset Character",
+                Color = Color3.fromRGB(255, 150, 100),
+                Callback = function()
+                    sendCommand("reset")
+                    sendNotify("Command", "Reset executed")
+                end
+            },
+            {
+                Text = "Reload Script",
+                Color = Color3.fromRGB(100, 255, 200),
+                Callback = function()
+                    sendCommand("reload")
+                    sendNotify("System", "Reloading all soldiers...")
                 end
             }
         }
@@ -1070,38 +1515,7 @@ local function createPanel()
         }
     })
 
-    -- Settings Drawer
-    local settingsDrawer = createDrawer({
-        Title = "Settings",
-        Description = "Toggle features on/off",
-        Icon = "🔧",
-        Color = Color3.fromRGB(180, 180, 190),
-        Buttons = {
-            {
-                Text = "Autojump: " .. (autoJumpEnabled and "ON" or "OFF"),
-                Color = autoJumpEnabled and Color3.fromRGB(100, 255, 150) or Color3.fromRGB(255, 100, 100),
-                Callback = function(btn)
-                    autoJumpEnabled = not autoJumpEnabled
-                    btn.Text = "Autojump: " .. (autoJumpEnabled and "ON" or "OFF")
-                    btn.TextColor3 = autoJumpEnabled and Color3.fromRGB(100, 255, 150) or Color3.fromRGB(255, 100, 100)
-
-                    -- Send command to toggle for all soldiers
-                    sendCommand("set_autojump " .. tostring(autoJumpEnabled))
-                    sendNotify("Settings", "Autojump " .. (autoJumpEnabled and "enabled" or "disabled"))
-                end
-            },
-            {
-                Text = "Debug Follow: " .. (debugFollowCommands and "ON" or "OFF"),
-                Color = debugFollowCommands and Color3.fromRGB(100, 255, 150) or Color3.fromRGB(255, 100, 100),
-                Callback = function(btn)
-                    debugFollowCommands = not debugFollowCommands
-                    btn.Text = "Debug Follow: " .. (debugFollowCommands and "ON" or "OFF")
-                    btn.TextColor3 = debugFollowCommands and Color3.fromRGB(100, 255, 150) or Color3.fromRGB(255, 100, 100)
-                    sendNotify("Settings", "Debug Follow " .. (debugFollowCommands and "enabled" or "disabled"))
-                end
-            }
-        }
-    })
+    -- Settings moved to top-right gear menu.
 
     -- Formation Drawer
     local formationDrawer = createDrawer({
@@ -1131,8 +1545,54 @@ local function createPanel()
                 Callback = function()
                     formationMode = "Follow" -- Auto-switch to Follow mode
                     if true then
-                        sendNotify("Follow Formation", "Click on a player to form around")
+                        sendNotify("Follow Formation", "Hover over a player to preview, click to form around them")
                         local highlights = highlightPlayers()
+                        
+                        -- Declare variables in outer scope for shared access
+                        local clientCount = 1
+                        local clientIds = {}
+                        local mouseMoveConn = nil
+                        
+                        -- Fetch client list for counting
+                        task.spawn(function()
+                            local request = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
+                            if request then
+                                local success, response = pcall(function()
+                                    return request({
+                                        Url = SERVER_URL .. "/clients",
+                                        Method = "GET"
+                                    })
+                                end)
+                                
+                                if success and response and response.Body then
+                                    local jsonSuccess, data = pcall(function()
+                                        return HttpService:JSONDecode(response.Body)
+                                    end)
+                                    if jsonSuccess and data then
+                                        clientCount = #data
+                                        for _, client in ipairs(data) do
+                                            table.insert(clientIds, client.id)
+                                        end
+                                    end
+                                end
+                            end
+                        end)
+                        
+                        -- Hover preview logic
+                        mouseMoveConn = RunService.RenderStepped:Connect(function()
+                            local target = Mouse.Target
+                            if target then
+                                local character = target:FindFirstAncestorOfClass("Model")
+                                if character then
+                                    local player = Players:GetPlayerFromCharacter(character)
+                                    if player and player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+                                        updateHolographicCubes(nil, formationShape, clientCount, player.Character.HumanoidRootPart.CFrame)
+                                        return
+                                    end
+                                end
+                            end
+                            clearHolographicCubes()
+                        end)
                         
                         setPendingClick(Mouse.Button1Down:Connect(function()
                             local target = Mouse.Target
@@ -1141,14 +1601,34 @@ local function createPanel()
                                 if character then
                                     local player = Players:GetPlayerFromCharacter(character)
                                     if player and player ~= LocalPlayer then
-                                        local formationCmd = string.format("formation_follow %d %s", player.UserId, formationShape)
+                                        -- Calculate relative offsets for all clients
+                                        local offsets = calculateFormationOffsets(formationShape, clientCount)
+                                        local offsetsData = {}
+                                        for i, clientId in ipairs(clientIds) do
+                                            if offsets[i] then
+                                                offsetsData[clientId] = {
+                                                    x = offsets[i].X,
+                                                    y = offsets[i].Y,
+                                                    z = offsets[i].Z
+                                                }
+                                            end
+                                        end
+                                        
+                                        local offsetsJson = HttpService:JSONEncode(offsetsData)
+                                        local formationCmd = string.format("formation_follow %d %s %s", player.UserId, formationShape, offsetsJson)
                                         sendCommand(formationCmd)
-                                        sendNotify("Formation", "Following " .. player.Name .. " in " .. formationShape)
+                                        
+                                        sendNotify("Formation", "Following " .. player.Name .. " with commander-calculated offsets")
+                                        
+                                        if mouseMoveConn then mouseMoveConn:Disconnect() end
+                                        clearHolographicCubes()
                                         cancelPendingClick()
                                     end
                                 end
                             end
                         end), function()
+                            if mouseMoveConn then mouseMoveConn:Disconnect() end
+                            clearHolographicCubes()
                             clearHighlights(highlights)
                         end)
                     end
@@ -1287,9 +1767,17 @@ local function createPanel()
             }
         }
     })
-    
 
-    
+    -- Re-order drawers to match the desired tab order:
+    -- Movement, Follow, Formation, Accounts
+    movementDrawer.Container.LayoutOrder = 1
+    followDrawer.Container.LayoutOrder = 2
+    formationDrawer.Container.LayoutOrder = 3
+    serverDrawer.Container.LayoutOrder = 4
+
+    -- "System" is merged into "Accounts" now.
+    systemDrawer.Container.Visible = false
+
     -- Initial State: Hidden
     panel.Position = UDim2.new(1, 0, 0.5, -240)
     screenGui.Parent = LocalPlayer.PlayerGui
@@ -1347,7 +1835,7 @@ table.insert(connections, UserInputService.InputBegan:Connect(function(input, pr
         if cancelPendingClick() then
             sendNotify("Command", "Cancelled pending target selection")
         else
-            cancelCurrentOrder(isCommander)
+            Movement.cancelAll(isCommander)
             sendNotify("Command", "Cancelled current order")
         end
     elseif input.KeyCode == Enum.KeyCode.F3 then
@@ -1450,14 +1938,7 @@ while isRunning do
                                     local coords = string.split(string.sub(action, 7), ",") -- Fixed index
                                     if #coords == 3 then
                                         local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
-                                        local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-                                        if hrp then
-                                            local distance = (hrp.Position - targetPos).Magnitude
-                                            local tweenSpeed = math.max(distance / 50, 1)
-                                            TweenService:Create(hrp, TweenInfo.new(tweenSpeed, Enum.EasingStyle.Linear), {
-                                                CFrame = CFrame.new(targetPos + Vector3.new(math.random(-3, 3), 1, math.random(-3, 3)))
-                                            }):Play()
-                                        end
+                                        Movement.tweenTo(targetPos, { speedDiv = 50, minTime = 1, randomRadius = 3, yOffset = 1 })
                                     end
                                 elseif string.sub(action, 1, 4) == "goto" then
                                     print("[GOTO] Received command:", action)
@@ -1467,7 +1948,7 @@ while isRunning do
                                     if #coords == 3 then
                                         local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
                                         print("[GOTO] Target pos:", targetPos)
-                                        startGotoWalk(targetPos)
+                                        Movement.slideTo(targetPos)
                                     end
                                 elseif string.sub(action, 1, 6) == "walkto" then
                                     print("[WALKTO] Received command:", action)
@@ -1477,10 +1958,10 @@ while isRunning do
                                     if #coords == 3 then
                                         local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
                                         print("[WALKTO] Target pos:", targetPos)
-                                        startGotoWalkMoveTo(targetPos)
+                                        Movement.walkTo(targetPos)
                                     end
                                 elseif action == "cancel" then
-                                    cancelCurrentOrder(false)
+                                    Movement.cancelAll(false)
                                 elseif action == "jump" then
                                     if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
                                         LocalPlayer.Character.Humanoid.Jump = true
@@ -1506,20 +1987,35 @@ while isRunning do
                                     loadstring(game:HttpGet(RELOAD_URL .. "?t=" .. os.time()))()
                                     return -- Stop this thread
                                 elseif string.sub(action, 1, 17) == "formation_follow " then
-                                    -- Format: formation_follow <userId> <shape>
-                                    local args = string.split(string.sub(action, 18), " ")
-                                    if #args >= 2 then
-                                        formationLeaderId = tonumber(args[1])
-                                        formationShape = args[2]
+                                    -- Format: formation_follow <userId> <shape> <offsets_json>
+                                    local payload = string.sub(action, 18)
+                                    local userIdStr, shapeStr, offsetsJson = string.match(payload, "^(%S+)%s+(%S+)%s+(.+)$")
+                                    
+                                    if userIdStr and shapeStr and offsetsJson then
+                                        formationLeaderId = tonumber(userIdStr)
+                                        formationShape = shapeStr
                                         formationMode = "Follow"
                                         formationActive = true
+                                        
+                                        -- Parse offsets JSON
+                                        local success, offsetsData = pcall(function()
+                                            return HttpService:JSONDecode(offsetsJson)
+                                        end)
+                                        
+                                        if success and offsetsData then
+                                            formationOffsets = offsetsData
+                                            print("[FORMATION] Received " .. shapeStr .. " offsets for " .. userIdStr)
+                                        else
+                                            formationOffsets = nil
+                                            warn("[FORMATION] Failed to parse follow offsets")
+                                        end
                                         
                                         -- Start following in formation
                                         if formationLeaderId then
                                             startFollowing(formationLeaderId, formationShape)
                                         end
                                         
-                                        sendNotify("Formation", "Following in " .. formationShape)
+                                        sendNotify("Formation", "Following " .. (userIdStr or "leader") .. " in " .. formationShape)
                                     end
                                 elseif string.sub(action, 1, 15) == "formation_goto " then
                                     -- Format: formation_goto <x,y,z> <shape> <positions_json>
@@ -1555,9 +2051,9 @@ while isRunning do
                                                     
                                                     -- Move to assigned position
                                                     stopFollowing()
-                                                    startGotoWalk(targetPos)
+                                                    Movement.walkTo(targetPos)
                                                     
-                                                    sendNotify("Formation", "Moving to assigned " .. formationShape .. " position")
+                                                    sendNotify("Formation", "Walking to assigned " .. formationShape .. " position")
                                                 else
                                                     sendNotify("Formation", "No position assigned by commander")
                                                 end
@@ -1572,6 +2068,7 @@ while isRunning do
                                     formationCenter = nil
                                     stopFollowing()
                                     stopGotoWalk()
+                                    stopMoveTween()
                                     clearHolographicCubes()
                                     sendNotify("Formation", "Formation cleared")
                                 elseif action == "rejoin" then
