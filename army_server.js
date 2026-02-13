@@ -162,10 +162,19 @@ const server = http.createServer((req, res) => {
         return;
     }
 
-    if (req.method === 'GET') {
-        // Client registration endpoint
-        if (req.url === '/register') {
-            const clientId = generateClientId();
+    // Client registration endpoint (Handled as ANY method to be flexible, but soldier will POST)
+    if (req.url === '/register') {
+        let body = '';
+        req.on('data', chunk => { body += chunk.toString(); });
+        req.on('end', () => {
+            let clientId;
+            try {
+                const data = body ? JSON.parse(body) : {};
+                clientId = data.name || data.displayName || generateClientId();
+            } catch (e) {
+                clientId = generateClientId();
+            }
+
             clients.set(clientId, {
                 id: clientId,
                 registeredAt: Date.now(),
@@ -176,9 +185,11 @@ const server = http.createServer((req, res) => {
             console.log(`[REGISTER] New client: ${clientId}`);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ clientId }));
-            return;
-        }
+        });
+        return;
+    }
 
+    if (req.method === 'GET') {
         // List clients endpoint
         if (req.url === '/clients') {
             const clientList = [];
@@ -188,7 +199,6 @@ const server = http.createServer((req, res) => {
                     registeredAt: client.registeredAt,
                     lastSeen: client.lastSeen,
                     lastCommandId: client.lastCommandId,
-                    executedCount: client.executedCommands ? client.executedCommands.size : 0
                 });
             }
             res.writeHead(200, { 'Content-Type': 'application/json' });

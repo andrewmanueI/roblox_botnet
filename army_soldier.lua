@@ -211,10 +211,16 @@ local function registerClient()
     local request = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
     if not request then return false end
 
+    local body = HttpService:JSONEncode({
+        name = LocalPlayer.Name
+    })
+
     local success, response = pcall(function()
         return request({
             Url = SERVER_URL .. "/register",
-            Method = "GET"
+            Method = "POST",
+            Body = body,
+            Headers = { ["Content-Type"] = "application/json" }
         })
     end)
 
@@ -225,7 +231,7 @@ local function registerClient()
 
         if jsonSuccess and data.clientId then
             clientId = data.clientId
-            sendNotify("System", "Registered as " .. string.sub(clientId, 1, 12) .. "...")
+            sendNotify("System", "Registered as " .. clientId .. "...")
             print("[ARMY] Registered as " .. clientId)
             return true
         end
