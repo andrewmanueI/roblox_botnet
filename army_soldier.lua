@@ -1162,6 +1162,11 @@ local function createPanel()
                     if true then
                         sendNotify("Goto Formation", "Fetching client count...")
                         
+                        -- Declare variables in outer scope
+                        local clientCount = 1
+                        local clientIds = {}
+                        local mouseMoveConn = nil
+                        
                         -- Fetch client count from server
                         task.spawn(function()
                             local request = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
@@ -1177,8 +1182,6 @@ local function createPanel()
                                 })
                             end)
                             
-                            local clientCount = 1 -- Default
-                            local clientIds = {}
                             if success and response and response.Body then
                                 local jsonSuccess, data = pcall(function()
                                     return HttpService:JSONDecode(response.Body)
@@ -1195,7 +1198,6 @@ local function createPanel()
                             end
                             
                             -- Show holographic formation preview at mouse position
-                            local mouseMoveConn
                             mouseMoveConn = RunService.RenderStepped:Connect(function()
                                 if Mouse.Hit then
                                     local targetPos = Mouse.Hit.Position
@@ -1522,10 +1524,14 @@ while isRunning do
                                 elseif string.sub(action, 1, 15) == "formation_goto " then
                                     -- Format: formation_goto <x,y,z> <shape> <positions_json>
                                     -- Positions calculated by commander
-                                    local parts = string.split(string.sub(action, 16), " ")
-                                    if #parts >= 4 then
-                                        local coords = string.split(parts[1], ",")
-                                        formationShape = parts[2]
+                                    -- NOTE: This payload is "<coords> <shape> <json>" (3 tokens).
+                                    -- Using string.split + a wrong length check would drop the command.
+                                    -- Also, JSON may contain spaces, so capture the "rest of string" as JSON.
+                                    local payload = string.sub(action, 16)
+                                    local coordsStr, shapeStr, positionsJson = string.match(payload, "^(%S+)%s+(%S+)%s+(.+)$")
+                                    if coordsStr and shapeStr and positionsJson then
+                                        local coords = string.split(coordsStr, ",")
+                                        formationShape = shapeStr
                                         formationMode = "Goto"
                                         formationActive = true
                                         
@@ -1537,7 +1543,6 @@ while isRunning do
                                             )
                                             
                                             -- Parse positions JSON from commander (via server)
-                                            local positionsJson = parts[3]
                                             if positionsJson then
                                                 local success, positionsData = pcall(function()
                                                     return HttpService:JSONDecode(positionsJson)
