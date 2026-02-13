@@ -340,11 +340,24 @@ const server = http.createServer((req, res) => {
                         if (!command.executedBy) {
                             command.executedBy = [];
                         }
+                        
+                        // Try to parse the error field as JSON (relay data)
+                        let processedError = error;
+                        if (typeof error === 'string' && (error.startsWith('[') || error.startsWith('{'))) {
+                            try {
+                                processedError = JSON.parse(error);
+                            } catch (e) {
+                                // Not valid JSON, keep as string
+                            }
+                        }
+
                         command.executedBy.push({
                             clientId,
                             executedAt: Date.now(),
                             success,
-                            error
+                            data: processedError, // Store as 'data' for clarity if JSON
+                            error: typeof processedError === 'string' ? processedError : null,
+                            lastSeen: client ? client.lastSeen : null
                         });
                     }
 

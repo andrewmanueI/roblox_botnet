@@ -767,6 +767,572 @@ local function fireVoodoo(targetPos)
     end
 end
 
+local function fireEquip(slot)
+    local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
+    if not ByteNetRemote then return end
+    
+    -- Create 3-byte buffer: [0][191][u8(slot)]
+    local b = buffer.create(3)
+    buffer.writeu8(b, 0, 0)   -- Namespace 0
+    buffer.writeu8(b, 1, 191)  -- Packet ID 191 (Equip/Unequip)
+    buffer.writeu8(b, 2, slot) -- Slot index
+    
+    -- Fire the buffer object DIRECTLY
+    ByteNetRemote:FireServer(b)
+end
+
+local function fireInventoryStore(slot)
+    local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
+    if not ByteNetRemote then return end
+    
+    -- Create 3-byte buffer: [0][209][u8(slot)]
+    local b = buffer.create(3)
+    buffer.writeu8(b, 0, 0)   -- Namespace 0
+    buffer.writeu8(b, 1, 209)  -- Packet ID 209 (Retool/Inventory Store)
+    buffer.writeu8(b, 2, slot) -- Slot index
+    
+    ByteNetRemote:FireServer(b)
+end
+
+local function fireInventoryUse(order)
+    local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
+    if not ByteNetRemote then return end
+    
+    -- Create 4-byte buffer: [0][43][u16(order)]
+    -- Packet 43: UseBagItem
+    local b = buffer.create(4)
+    buffer.writeu8(b, 0, 0)   -- Namespace 0
+    buffer.writeu8(b, 1, 43)  -- Packet ID 43
+    buffer.writeu16(b, 2, order) -- Index (u16 little-endian)
+    
+    ByteNetRemote:FireServer(b)
+end
+
+local function fireInventoryDrop(order)
+    local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
+    if not ByteNetRemote then return end
+    
+    -- Create 4-byte buffer: [0][74][u16(order)]
+    -- Packet 74: DropBagItem
+    local b = buffer.create(4)
+    buffer.writeu8(b, 0, 0)   -- Namespace 0
+    buffer.writeu8(b, 1, 74)  -- Packet ID 74
+    buffer.writeu16(b, 2, order) -- Index (u16 little-endian)
+    
+    ByteNetRemote:FireServer(b)
+end
+
+local function getInventoryReport(query)
+    local results = {}
+    local inventoryList = LocalPlayer.PlayerGui:FindFirstChild("MainGui", true)
+        and LocalPlayer.PlayerGui.MainGui:FindFirstChild("RightPanel", true)
+        and LocalPlayer.PlayerGui.MainGui.RightPanel:FindFirstChild("Inventory", true)
+        and LocalPlayer.PlayerGui.MainGui.RightPanel.Inventory:FindFirstChild("List", true)
+
+    if not inventoryList then return "{}" end
+
+    local targetQuery = query and query:lower() or ""
+
+    for _, item in ipairs(inventoryList:GetChildren()) do
+        if item:IsA("GuiObject") and item.Name ~= "UIListLayout" then
+            local itemName = item.Name
+            if itemName:lower():find(targetQuery, 1, true) then
+                local quantity = "1"
+                local qText = item:FindFirstChild("QuantityText", true)
+                if qText then
+                    quantity = qText.Text:gsub("x", ""):gsub("%D", "")
+                end
+                
+                table.insert(results, {
+                    name = itemName,
+                    quantity = tonumber(quantity) or 1,
+                    order = item.LayoutOrder
+                })
+            end
+        end
+    end
+    
+    return HttpService:JSONEncode(results)
+end
+
+local function dropItemByName(itemName, quantity)
+    local inventoryList = LocalPlayer.PlayerGui:FindFirstChild("MainGui", true)
+        and LocalPlayer.PlayerGui.MainGui:FindFirstChild("RightPanel", true)
+        and LocalPlayer.PlayerGui.MainGui.RightPanel:FindFirstChild("Inventory", true)
+        and LocalPlayer.PlayerGui.MainGui.RightPanel.Inventory:FindFirstChild("List", true)
+
+    if not inventoryList then return end
+    
+    local targetQty = tonumber(quantity) or 1
+    local dropped = 0
+    
+    for _, item in ipairs(inventoryList:GetChildren()) do
+        if item:IsA("GuiObject") and item.Name:lower() == itemName:lower() then
+            local order = item.LayoutOrder
+            for i = 1, targetQty do
+                fireInventoryDrop(order)
+                dropped = dropped + 1
+                task.wait(0.05)
+            end
+            break
+        end
+    end
+    print("[DROP] Dropped " .. dropped .. "x " .. itemName)
+end
+
+local function showInventoryManager()
+    local coreGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if not coreGui then return end
+    
+    if coreGui:FindFirstChild("ArmyInventoryManager") then
+        coreGui.ArmyInventoryManager:Destroy()
+    end
+    
+    local screenGui = Instance.new("ScreenGui", coreGui)
+    screenGui.Name = "ArmyInventoryManager"
+    
+    local mainFrame = Instance.new("Frame", screenGui)
+    mainFrame.Size = UDim2.new(0, 650, 0, 450)
+    mainFrame.Position = UDim2.new(0.5, -325, 0.5, -225)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+    mainFrame.BorderSizePixel = 0
+    Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 12)
+    Instance.new("UIStroke", mainFrame).Color = Color3.fromRGB(60, 60, 70)
+    
+    -- Header
+    local header = Instance.new("Frame", mainFrame)
+    header.Size = UDim2.new(1, 0, 0, 50)
+    header.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+    header.BorderSizePixel = 0
+    local hc = Instance.new("UICorner", header)
+    hc.CornerRadius = UDim.new(0, 12)
+    
+    local title = Instance.new("TextLabel", header)
+    title.Size = UDim2.new(1, -60, 1, 0)
+    title.Position = UDim2.new(0, 20, 0, 0)
+    title.Text = "INVENTORY MANAGER"
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.TextSize = 18
+    title.Font = Enum.Font.GothamBold
+    title.BackgroundTransparency = 1
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    
+    local close = Instance.new("TextButton", header)
+    close.Size = UDim2.new(0, 50, 0, 50)
+    close.Position = UDim2.new(1, -50, 0, 0)
+    close.Text = "X"
+    close.TextColor3 = Color3.fromRGB(255, 100, 100)
+    close.TextSize = 20
+    close.Font = Enum.Font.GothamBold
+    close.BackgroundTransparency = 1
+    close.MouseButton1Click:Connect(function() screenGui:Destroy() end)
+
+    local refreshBtn = Instance.new("TextButton", header)
+    refreshBtn.Size = UDim2.new(0, 80, 0, 30)
+    refreshBtn.Position = UDim2.new(1, -140, 0, 10)
+    refreshBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
+    refreshBtn.Text = "REFRESH"
+    refreshBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+    refreshBtn.TextSize = 12
+    refreshBtn.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", refreshBtn).CornerRadius = UDim.new(0, 6)
+    
+    -- Forward declaration of fetchClients is needed if we use it here, 
+    -- but let's just make it call the local function defined later.
+    
+    -- ... (Container setup) ...
+    local container = Instance.new("Frame", mainFrame)
+    container.Size = UDim2.new(1, -20, 1, -70)
+    container.Position = UDim2.new(0, 10, 0, 60)
+    container.BackgroundTransparency = 1
+    
+    -- Left Panel (Clients)
+    local leftPanel = Instance.new("ScrollingFrame", container)
+    leftPanel.Size = UDim2.new(0.3, -5, 1, 0)
+    leftPanel.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+    leftPanel.BorderSizePixel = 0
+    leftPanel.ScrollBarThickness = 2
+    Instance.new("UICorner", leftPanel).CornerRadius = UDim.new(0, 8)
+    local leftLayout = Instance.new("UIListLayout", leftPanel)
+    leftLayout.Padding = UDim.new(0, 5)
+    
+    -- Right Panel (Content)
+    local rightPanel = Instance.new("Frame", container)
+    rightPanel.Size = UDim2.new(0.7, -5, 1, 0)
+    rightPanel.Position = UDim2.new(0.3, 5, 0, 0)
+    rightPanel.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+    rightPanel.BorderSizePixel = 0
+    Instance.new("UICorner", rightPanel).CornerRadius = UDim.new(0, 8)
+    
+    local selectedClientId = nil
+    
+    local function updateRightPanel()
+        for _, child in ipairs(rightPanel:GetChildren()) do
+            if not child:IsA("UICorner") then child:Destroy() end
+        end
+        
+        if not selectedClientId then
+            -- Global Search Mode
+            local searchLabel = Instance.new("TextLabel", rightPanel)
+            searchLabel.Size = UDim2.new(1, -20, 0, 30)
+            searchLabel.Position = UDim2.new(0, 10, 0, 10)
+            searchLabel.Text = "Global Inventory Search (Across all soldiers)"
+            searchLabel.TextColor3 = Color3.fromRGB(200, 200, 210)
+            searchLabel.TextSize = 14
+            searchLabel.Font = Enum.Font.GothamBold
+            searchLabel.BackgroundTransparency = 1
+            searchLabel.TextXAlignment = Enum.TextXAlignment.Left
+            
+            local searchBox = Instance.new("TextBox", rightPanel)
+            searchBox.Size = UDim2.new(1, -20, 0, 40)
+            searchBox.Position = UDim2.new(0, 10, 0, 45)
+            searchBox.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+            searchBox.Text = ""
+            searchBox.PlaceholderText = "Search items (case insensitive)..."
+            searchBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+            searchBox.Font = Enum.Font.Gotham
+            Instance.new("UICorner", searchBox)
+            
+            local resultsFrame = Instance.new("ScrollingFrame", rightPanel)
+            resultsFrame.Size = UDim2.new(1, -20, 1, -150)
+            resultsFrame.Position = UDim2.new(0, 10, 0, 95)
+            resultsFrame.BackgroundTransparency = 1
+            resultsFrame.ScrollBarThickness = 2
+            local resultLayout = Instance.new("UIListLayout", resultsFrame)
+            resultLayout.Padding = UDim.new(0, 2)
+            
+            local searchBtn = Instance.new("TextButton", rightPanel)
+            searchBtn.Size = UDim2.new(1, -20, 0, 40)
+            searchBtn.Position = UDim2.new(0, 10, 1, -50)
+            searchBtn.BackgroundColor3 = Color3.fromRGB(100, 150, 255)
+            searchBtn.Text = "RUN GLOBAL SCAN"
+            searchBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+            searchBtn.Font = Enum.Font.GothamBold
+            Instance.new("UICorner", searchBtn)
+            
+            searchBtn.MouseButton1Click:Connect(function()
+                local query = searchBox.Text
+                sendCommand("inventory_report_all " .. query)
+                sendNotify("Inventory", "Global scan requested...")
+                
+                resultsFrame:ClearAllChildren()
+                local statusLabel = Instance.new("TextLabel", resultsFrame)
+                statusLabel.Size = UDim2.new(1, 0, 0, 30)
+                statusLabel.Text = "Scanning soldiers..."
+                statusLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+                statusLabel.Font = Enum.Font.Gotham
+                statusLabel.BackgroundTransparency = 1
+                
+                task.spawn(function()
+                    local req = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
+                    if not req then return end
+                    
+                    -- 1. Get current command ID to track
+                    local res = req({Url = SERVER_URL .. "/status", Method = "GET"})
+                    if res.StatusCode ~= 200 then return end
+                    local statusData = HttpService:JSONDecode(res.Body)
+                    local trackCmdId = statusData.server.latestCommandId
+                    
+                    -- 2. Poll for 5 seconds to collect responses
+                    local foundAny = false
+                    for i = 1, 10 do
+                        task.wait(0.5)
+                        local cmdRes = req({Url = SERVER_URL .. "/command/" .. trackCmdId, Method = "GET"})
+                        if cmdRes.StatusCode == 200 then
+                            local cmdData = HttpService:JSONDecode(cmdRes.Body)
+                            resultsFrame:ClearAllChildren()
+                            foundAny = false
+                            
+                            for _, exec in ipairs(cmdData.executedBy or {}) do
+                                local reportData = exec.data
+                                if type(reportData) == "table" then
+                                    foundAny = true
+                                    for _, item in ipairs(reportData) do
+                                        local itemRow = Instance.new("Frame", resultsFrame)
+                                        itemRow.Size = UDim2.new(1, 0, 0, 30)
+                                        itemRow.BackgroundTransparency = 1
+                                        
+                                        local nameLbl = Instance.new("TextLabel", itemRow)
+                                        nameLbl.Size = UDim2.new(0.4, 0, 1, 0)
+                                        nameLbl.Text = item.name
+                                        nameLbl.TextColor3 = Color3.fromRGB(220, 220, 220)
+                                        nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+                                        nameLbl.BackgroundTransparency = 1
+                                        
+                                        local clientLbl = Instance.new("TextLabel", itemRow)
+                                        clientLbl.Size = UDim2.new(0.3, 0, 1, 0)
+                                        clientLbl.Position = UDim2.new(0.4, 0, 0, 0)
+                                        clientLbl.Text = string.sub(exec.clientId, 1, 8)
+                                        clientLbl.TextColor3 = Color3.fromRGB(150, 150, 150)
+                                        clientLbl.BackgroundTransparency = 1
+                                        
+                                        local qtyLbl = Instance.new("TextLabel", itemRow)
+                                        qtyLbl.Size = UDim2.new(0.2, 0, 1, 0)
+                                        qtyLbl.Position = UDim2.new(0.7, 0, 0, 0)
+                                        qtyLbl.Text = "x" .. (item.quantity or 1)
+                                        qtyLbl.TextColor3 = Color3.fromRGB(100, 255, 100)
+                                        qtyLbl.BackgroundTransparency = 1
+                                    end
+                                end
+                            end
+                            
+                            if not foundAny then
+                                local waitLabel = Instance.new("TextLabel", resultsFrame)
+                                waitLabel.Size = UDim2.new(1, 0, 0, 30)
+                                waitLabel.Text = "Waiting for soldiers to report... (" .. i .. ")"
+                                waitLabel.TextColor3 = Color3.fromRGB(120, 120, 120)
+                                waitLabel.BackgroundTransparency = 1
+                            end
+                        end
+                    end
+                    
+                    if not foundAny then
+                        statusLabel.Text = "No items found or soldiers timed out."
+                    end
+                end)
+            end)
+        else
+            -- Individual Client Mode
+            local clientTitle = Instance.new("TextLabel", rightPanel)
+            clientTitle.Size = UDim2.new(1, -20, 0, 40)
+            clientTitle.Position = UDim2.new(0, 10, 0, 10)
+            clientTitle.Text = "SOLDIER: " .. string.sub(selectedClientId, 1, 8)
+            clientTitle.TextColor3 = Color3.fromRGB(255, 200, 100)
+            clientTitle.TextSize = 16
+            clientTitle.Font = Enum.Font.GothamBold
+            clientTitle.BackgroundTransparency = 1
+            clientTitle.TextXAlignment = Enum.TextXAlignment.Left
+            
+            local dropName = Instance.new("TextBox", rightPanel)
+            dropName.Size = UDim2.new(1, -20, 0, 40)
+            dropName.Position = UDim2.new(0, 10, 0, 60)
+            dropName.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+            dropName.PlaceholderText = "Item Name to Drop"
+            dropName.Text = ""
+            dropName.TextColor3 = Color3.fromRGB(255, 255, 255)
+            dropName.Font = Enum.Font.Gotham
+            Instance.new("UICorner", dropName)
+            
+            local dropQty = Instance.new("TextBox", rightPanel)
+            dropQty.Size = UDim2.new(1, -20, 0, 40)
+            dropQty.Position = UDim2.new(0, 10, 0, 110)
+            dropQty.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+            dropQty.PlaceholderText = "Quantity (Default 1)"
+            dropQty.Text = "1"
+            dropQty.TextColor3 = Color3.fromRGB(255, 255, 255)
+            dropQty.Font = Enum.Font.Gotham
+            Instance.new("UICorner", dropQty)
+            
+            local dropBtn = Instance.new("TextButton", rightPanel)
+            dropBtn.Size = UDim2.new(1, -20, 0, 50)
+            dropBtn.Position = UDim2.new(0, 10, 0, 170)
+            dropBtn.BackgroundColor3 = Color3.fromRGB(255, 100, 100)
+            dropBtn.Text = "DROP ITEM(S)"
+            dropBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+            dropBtn.Font = Enum.Font.GothamBold
+            Instance.new("UICorner", dropBtn)
+            
+            dropBtn.MouseButton1Click:Connect(function()
+                local name = dropName.Text
+                local qty = dropQty.Text
+                if name ~= "" then
+                    sendCommand("target_drop " .. selectedClientId .. " " .. name .. " " .. qty)
+                    sendNotify("Inventory", "Drop command sent to soldier")
+                end
+            end)
+            
+            local deselectBtn = Instance.new("TextButton", rightPanel)
+            deselectBtn.Size = UDim2.new(1, -20, 0, 40)
+            deselectBtn.Position = UDim2.new(0, 10, 1, -50)
+            deselectBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+            deselectBtn.Text = "BACK TO GLOBAL SEARCH"
+            deselectBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+            deselectBtn.Font = Enum.Font.GothamBold
+            Instance.new("UICorner", deselectBtn)
+            deselectBtn.MouseButton1Click:Connect(function() 
+                selectedClientId = nil
+                updateRightPanel()
+            end)
+        end
+    end
+    
+    local function fetchClients()
+        for _, child in ipairs(leftPanel:GetChildren()) do
+            if child:IsA("TextButton") then child:Destroy() end
+        end
+        
+        local req = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
+        if req then
+            task.spawn(function()
+                local res = req({Url = SERVER_URL .. "/clients", Method = "GET"})
+                if res.StatusCode == 200 then
+                    local clientsList = HttpService:JSONDecode(res.Body)
+                    for _, c in ipairs(clientsList) do
+                        local btn = Instance.new("TextButton", leftPanel)
+                        btn.Size = UDim2.new(1, -10, 0, 35)
+                        btn.BackgroundColor3 = (selectedClientId == c.id) and Color3.fromRGB(100, 150, 255) or Color3.fromRGB(40, 40, 45)
+                        btn.Text = string.sub(c.id, 1, 12) .. (c.id == clientId and " (YOU)" or "")
+                        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+                        btn.Font = Enum.Font.Gotham
+                        btn.TextSize = 12
+                        Instance.new("UICorner", btn)
+                        
+                        btn.MouseButton1Click:Connect(function()
+                            selectedClientId = c.id
+                            updateRightPanel()
+                            fetchClients()
+                        end)
+                    end
+                end
+            end)
+        end
+    end
+    
+    refreshBtn.MouseButton1Click:Connect(fetchClients)
+    fetchClients()
+    updateRightPanel()
+end
+
+local function performToolbarScan(targetName)
+    local toolbarContainer = LocalPlayer.PlayerGui:FindFirstChild("MainGui", true)
+        and LocalPlayer.PlayerGui.MainGui:FindFirstChild("Panels", true)
+        and LocalPlayer.PlayerGui.MainGui.Panels:FindFirstChild("Toolbar", true)
+        and LocalPlayer.PlayerGui.MainGui.Panels.Toolbar:FindFirstChild("Container", true)
+        
+    local toolbarTitle = toolbarContainer and toolbarContainer:FindFirstChild("Title", true)
+
+    if not toolbarTitle then
+        warn("[SCAN] Toolbar Title UI not found")
+        return nil
+    end
+
+    for slot = 1, 6 do
+        fireEquip(slot)
+        task.wait(0.6) -- Wait for server/UI update
+        
+        local currentText = toolbarTitle.Text:lower()
+        if currentText:find(targetName, 1, true) then
+            print("[SCAN] Successfully equipped in toolbar slot " .. slot)
+            return slot
+        end
+    end
+    return nil
+end
+
+local function scanAndEquip(toolName)
+    if not toolName or toolName == "" then return end
+    print("[SCAN] Attempting to find tool in Toolbar: " .. toolName)
+    
+    local targetName = toolName:lower()
+    
+    -- Phase 1: Scan Toolbar (Slots 1-6)
+    local foundSlot = performToolbarScan(targetName)
+    if foundSlot then
+        return true
+    end
+    
+    -- Phase 2: Search Inventory Fallback
+    print("[SCAN] Not in toolbar. Searching Inventory for: " .. toolName)
+    local inventoryList = LocalPlayer.PlayerGui:FindFirstChild("MainGui", true)
+        and LocalPlayer.PlayerGui.MainGui:FindFirstChild("RightPanel", true)
+        and LocalPlayer.PlayerGui.MainGui.RightPanel:FindFirstChild("Inventory", true)
+        and LocalPlayer.PlayerGui.MainGui.RightPanel.Inventory:FindFirstChild("List", true)
+
+    if inventoryList then
+        for _, item in ipairs(inventoryList:GetChildren()) do
+            if item:IsA("GuiObject") and item.Name:lower():find(targetName, 1, true) then
+                local order = item.LayoutOrder
+                print("[SCAN] Found in Inventory! Order: " .. order .. ". Firing UseBagItem Remote (43)")
+                fireInventoryUse(order)
+                
+                -- Wait 3 seconds and verify it's now in the toolbar
+                print("[SCAN] Waiting 3s for inventory -> toolbar move...")
+                task.wait(3)
+                print("[SCAN] Verifying toolbar placement...")
+                local verifiedSlot = performToolbarScan(targetName)
+                if verifiedSlot then
+                    print("[SCAN] Verification success: Tool now in slot " .. verifiedSlot)
+                    return true
+                else
+                    print("[SCAN] Verification failed: Tool not found in toolbar after use")
+                end
+                return true -- Still return true as we fired the remote, but verification is logged
+            end
+        end
+    else
+        warn("[SCAN] Inventory List UI not found")
+    end
+    
+    print("[SCAN] Failed to find " .. toolName .. " anywhere")
+    return false
+end
+
+local function showToolSearchDialog()
+    local coreGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if not coreGui then return end
+    
+    local dialog = Instance.new("ScreenGui", coreGui)
+    dialog.Name = "ArmySearchDialog"
+    
+    local frame = Instance.new("Frame", dialog)
+    frame.Size = UDim2.new(0, 300, 0, 150)
+    frame.Position = UDim2.new(0.5, -150, 0.5, -75)
+    frame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+    frame.BorderSizePixel = 0
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 10)
+    Instance.new("UIStroke", frame).Color = Color3.fromRGB(60, 60, 70)
+    
+    local title = Instance.new("TextLabel", frame)
+    title.Size = UDim2.new(1, 0, 0, 40)
+    title.Text = "Equip Tool for Army"
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.TextSize = 16
+    title.Font = Enum.Font.GothamBold
+    title.BackgroundTransparency = 1
+    
+    local input = Instance.new("TextBox", frame)
+    input.Size = UDim2.new(0.8, 0, 0, 35)
+    input.Position = UDim2.new(0.1, 0, 0.35, 0)
+    input.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+    input.Text = ""
+    input.PlaceholderText = "Enter tool name (e.g. WOOD HOE)"
+    input.TextColor3 = Color3.fromRGB(255, 255, 255)
+    input.TextSize = 14
+    input.Font = Enum.Font.Gotham
+    Instance.new("UICorner", input).CornerRadius = UDim.new(0, 6)
+    
+    local confirm = Instance.new("TextButton", frame)
+    confirm.Size = UDim2.new(0.35, 0, 0, 30)
+    confirm.Position = UDim2.new(0.1, 0, 0.7, 0)
+    confirm.BackgroundColor3 = Color3.fromRGB(100, 200, 100)
+    confirm.Text = "Search"
+    confirm.TextColor3 = Color3.fromRGB(255, 255, 255)
+    confirm.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", confirm).CornerRadius = UDim.new(0, 6)
+    
+    local cancel = Instance.new("TextButton", frame)
+    cancel.Size = UDim2.new(0.35, 0, 0, 30)
+    cancel.Position = UDim2.new(0.55, 0, 0.7, 0)
+    cancel.BackgroundColor3 = Color3.fromRGB(200, 100, 100)
+    cancel.Text = "Cancel"
+    cancel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    cancel.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", cancel).CornerRadius = UDim.new(0, 6)
+    
+    confirm.MouseButton1Click:Connect(function()
+        local toolName = input.Text
+        if toolName ~= "" then
+            sendCommand("sync_equip " .. toolName)
+            sendNotify("Army Sync", "Soldiers searching for " .. toolName)
+        end
+        dialog:Destroy()
+    end)
+    
+    cancel.MouseButton1Click:Connect(function()
+        dialog:Destroy()
+    end)
+end
+
 local function terminateScript()
     isRunning = false
     sendNotify("Army Script", "Script Terminated")
@@ -1788,37 +2354,64 @@ local function createPanel()
     })
 
     -- Booga Booga Drawer
-    local boogaDrawer = createDrawer({
-        Title = "Booga Booga",
-        Description = "Booga Booga special actions",
-        Icon = "👺",
-        Color = Color3.fromRGB(255, 100, 50),
-        Buttons = {
-            {
-                Text = "Auto Voodoo",
-                Color = Color3.fromRGB(200, 100, 255),
-                Callback = function()
-                    sendNotify("Auto Voodoo", "Click where you want soldiers to fire voodoo")
-                    setPendingClick(Mouse.Button1Down:Connect(function()
-                        if Mouse.Hit then
-                            local targetPos = Mouse.Hit.Position
-                            local voodooCmd = string.format("voodoo %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
-                            sendCommand(voodooCmd)
-                            sendNotify("Voodoo", "Soldiers firing voodoo at target")
-                            cancelPendingClick()
-                        end
-                    end), nil)
-                end
+    local boogaDrawer = nil
+    if game.PlaceId == 11729688377 then
+        boogaDrawer = createDrawer({
+            Title = "Booga Booga",
+            Description = "Booga Booga special actions",
+            Icon = "👺",
+            Color = Color3.fromRGB(255, 100, 50),
+            Buttons = {
+                {
+                    Text = "Auto Voodoo",
+                    Color = Color3.fromRGB(200, 100, 255),
+                    Callback = function()
+                        sendNotify("Auto Voodoo", "Click where you want soldiers to fire voodoo")
+                        setPendingClick(Mouse.Button1Down:Connect(function()
+                            if Mouse.Hit then
+                                local targetPos = Mouse.Hit.Position
+                                local voodooCmd = string.format("voodoo %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
+                                sendCommand(voodooCmd)
+                                sendNotify("Voodoo", "Soldiers firing voodoo at target")
+                                cancelPendingClick()
+                            end
+                        end), nil)
+                    end
+                },
+                {
+                    Text = "Equip Tool",
+                    Color = Color3.fromRGB(100, 200, 255),
+                    Callback = function()
+                        showToolSearchDialog()
+                    end
+                },
+                {
+                    Text = "Inventory Manager",
+                    Color = Color3.fromRGB(200, 100, 255),
+                    Callback = function()
+                        showInventoryManager()
+                    end
+                },
+                {
+                    Text = "Unequip All",
+                    Color = Color3.fromRGB(200, 200, 200),
+                    Callback = function()
+                        sendCommand("unequip_all")
+                        sendNotify("Equip", "Army clearing toolbar to inventory")
+                    end
+                }
             }
-        }
-    })
+        })
+    end
 
     -- Re-order drawers to match the desired tab order:
-    -- Movement, Follow, Formation, Booga Booga, Accounts
+    -- Movement, Follow, Formation, Booga Booga (if visible), Accounts
     movementDrawer.Container.LayoutOrder = 1
     followDrawer.Container.LayoutOrder = 2
     formationDrawer.Container.LayoutOrder = 3
-    boogaDrawer.Container.LayoutOrder = 4
+    if boogaDrawer then
+        boogaDrawer.Container.LayoutOrder = 4
+    end
     serverDrawer.Container.LayoutOrder = 5
 
     -- "System" is merged into "Accounts" now.
@@ -1979,6 +2572,24 @@ while isRunning do
                                 if string.sub(action, 1, 4) ~= "goto" then
                                     stopGotoWalk()
                                 end
+                                
+                                -- BOOGA BOOGA ACTIONS --
+                                if string.sub(action, 1, 21) == "inventory_report_all " then
+                                    local query = string.sub(action, 22)
+                                    local report = getInventoryReport(query)
+                                    acknowledgeCommand(commandId, true, report)
+                                    return true
+                                elseif string.sub(action, 1, 12) == "target_drop " then
+                                    -- Format: target_drop <clientId> <name> <qty>
+                                    local parts = string.split(action, " ")
+                                    if parts[2] == clientId then
+                                        local name = parts[3]
+                                        local qty = parts[4]
+                                        dropItemByName(name, qty)
+                                    end
+                                    return true
+                                end
+                                
                                 if string.sub(action, 1, 5) == "bring" then
                                     stopFollowing()
                                     local coords = string.split(string.sub(action, 7), ",") -- Fixed index
@@ -2069,6 +2680,23 @@ while isRunning do
                                         local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
                                         fireVoodoo(targetPos)
                                         print("[VOODOO] Fired at " .. tostring(targetPos))
+                                    end
+                                elseif string.sub(action, 1, 6) == "equip " then
+                                    local slot = tonumber(string.sub(action, 7))
+                                    if slot then
+                                        fireEquip(slot)
+                                        print("[EQUIP] Fired for slot " .. slot)
+                                    end
+                                elseif action == "unequip_all" then
+                                    for slot = 1, 6 do
+                                        fireInventoryStore(slot)
+                                        task.wait(0.1)
+                                    end
+                                    print("[UNEQUIP] All slots cleared to inventory")
+                                elseif string.sub(action, 1, 11) == "sync_equip " then
+                                    local toolName = string.sub(action, 12)
+                                    if toolName then
+                                        task.spawn(scanAndEquip, toolName)
                                     end
                                 elseif string.sub(action, 1, 15) == "formation_goto " then
                                     -- Format: formation_goto <x,y,z> <shape> <positions_json>
