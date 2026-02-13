@@ -55,6 +55,11 @@ local function endForceAutoJump()
 end
 local gotoWalkToken = 0 -- increments to cancel any active goto walk loop
 local debugFollowCommands = false -- When true, commander will also execute server commands.
+local observeServerCommands = true -- When true, commander shows a notification when an order is received.
+local autoResendIfNotObserved = false -- If true, commander will re-send commands that don't come back from server.
+local AUTO_RESEND_TIMEOUT = 1.25 -- seconds to wait for the command to show up via polling before re-sending
+local AUTO_RESEND_MAX = 1 -- number of re-sends (in addition to the first send)
+local receivedActionAt = {} -- [actionString] = os.clock() timestamp when last observed from server
 local pendingMouseClickConnection = nil -- used for click-to-target modes; cancel should close it
 local pendingMouseClickCleanup = nil -- optional cleanup for pending click mode (e.g. clear highlights)
 local CANCEL_COOLDOWN = 0.35 -- seconds; prevents spamming cancel key
@@ -75,8 +80,37 @@ local formationHoloCubes = {} -- Array of holographic cube parts
 local formationIndex = nil -- This client's assigned index in formation
 local formationActive = false
 local formationLeaderId = nil
-local formationCenter = nil
 local formationOffsets = nil -- Map of userId -> {x, y, z} relative offsets
+
+
+-- Centralized Network Request Helper
+local networkRequest = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
+
+local function robustRequest(options)
+    if not networkRequest then return false, nil end
+    -- Retries intentionally disabled: one request attempt per call.
+    local success, response = pcall(function()
+        return networkRequest(options)
+    end)
+
+    -- Different executors / request libs return slightly different shapes.
+    -- Normalize enough to detect success reliably.
+    local statusCode = nil
+    if success and response then
+        statusCode = tonumber(response.StatusCode)
+            or tonumber(response.Status)
+            or tonumber(response.statusCode)
+            or tonumber(response.status)
+    end
+
+    local responseSaysSuccess = (success and response and (response.Success == true or response.success == true))
+
+    if responseSaysSuccess or (success and response and statusCode and statusCode >= 200 and statusCode < 400) then
+        return true, response
+    end
+
+    return false, response
+end
 
 
 -- Background autojump loop: runs continuously and checks `autoJumpEnabled`.
@@ -191,38 +225,69 @@ local function sendNotify(title, text)
     end)
 end
 
-sendCommand = function(cmd)
-    task.spawn(function()
-        local request = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
-        if request then
-            request({
-                Url = SERVER_URL,
-                Method = "POST",
-                Body = cmd,
-                Headers = { ["Content-Type"] = "text/plain" }
-            })
-        else
-            pcall(function() game:HttpPost(SERVER_URL, cmd) end)
-        end
+local function recordObservedAction(action)
+    if type(action) ~= "string" then return end
+    receivedActionAt[action] = os.clock()
+end
+
+local function wasActionObservedSince(action, sinceTime)
+    local t = receivedActionAt[action]
+    return (t ~= nil) and (t >= sinceTime)
+end
+
+local function sendCommandOnce(cmd)
+    -- One request attempt per call. No retries.
+    if networkRequest then
+        robustRequest({
+            Url = SERVER_URL,
+            Method = "POST",
+            Body = cmd,
+            Headers = { ["Content-Type"] = "text/plain" }
+        })
+        return
+    end
+
+    pcall(function()
+        game:HttpPost(SERVER_URL, cmd)
     end)
 end
 
+sendCommand = function(cmd)
+    local sentAt = os.clock()
+
+    task.spawn(function()
+        sendCommandOnce(cmd)
+    end)
+
+    -- Optional commander-side resend: only re-send if we never see the same action come back from the server.
+    -- Best-effort: relies on the server broadcasting the action string unchanged.
+    if isCommander and observeServerCommands and autoResendIfNotObserved then
+        task.spawn(function()
+            for _ = 1, AUTO_RESEND_MAX do
+                task.wait(AUTO_RESEND_TIMEOUT)
+                if wasActionObservedSince(cmd, sentAt) then
+                    return
+                end
+                sentAt = os.clock()
+                sendCommandOnce(cmd)
+            end
+        end)
+    end
+end
+
 local function registerClient()
-    local request = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
-    if not request then return false end
+    if not networkRequest then return false end
 
     local body = HttpService:JSONEncode({
         name = LocalPlayer.Name
     })
 
-    local success, response = pcall(function()
-        return request({
-            Url = SERVER_URL .. "/register",
-            Method = "POST",
-            Body = body,
-            Headers = { ["Content-Type"] = "application/json" }
-        })
-    end)
+    local success, response = robustRequest({
+        Url = SERVER_URL .. "/register",
+        Method = "POST",
+        Body = body,
+        Headers = { ["Content-Type"] = "application/json" }
+    })
 
     if success and response and response.Body then
         local jsonSuccess, data = pcall(function()
@@ -243,17 +308,12 @@ end
 local function sendHeartbeat()
     if not clientId then return false end
 
-    local request = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
-    if not request then return false end
-
-    local success = pcall(function()
-        request({
-            Url = SERVER_URL .. "/heartbeat",
-            Method = "POST",
-            Body = HttpService:JSONEncode({ clientId = clientId }),
-            Headers = { ["Content-Type"] = "application/json" }
-        })
-    end)
+    local success = robustRequest({
+        Url = SERVER_URL .. "/heartbeat",
+        Method = "POST",
+        Body = HttpService:JSONEncode({ clientId = clientId }),
+        Headers = { ["Content-Type"] = "application/json" }
+    })
 
     return success
 end
@@ -261,24 +321,26 @@ end
 local function acknowledgeCommand(commandId, success, errorMsg)
     if not clientId then return false end
 
-    local request = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
-    if not request then return false end
+    -- Normalize success: allow explicit false (the previous `success or true` would force it to true).
+    local normalizedSuccess = (success == nil) and true or success
 
     local payload = HttpService:JSONEncode({
         clientId = clientId,
         commandId = commandId,
-        success = success or true,
-        error = errorMsg or nil
+        success = normalizedSuccess,
+        -- Some server implementations use "error" only on failure, and a separate "result"/"report" on success.
+        -- Send the response in multiple fields for compatibility; the server can ignore what it doesn't need.
+        error = (normalizedSuccess == false) and (errorMsg or nil) or nil,
+        result = (normalizedSuccess ~= false) and (errorMsg or nil) or nil,
+        report = (normalizedSuccess ~= false) and (errorMsg or nil) or nil
     })
 
-    local ackSuccess = pcall(function()
-        request({
-            Url = SERVER_URL .. "/acknowledge",
-            Method = "POST",
-            Body = payload,
-            Headers = { ["Content-Type"] = "application/json" }
-        })
-    end)
+    local ackSuccess = robustRequest({
+        Url = SERVER_URL .. "/acknowledge",
+        Method = "POST",
+        Body = payload,
+        Headers = { ["Content-Type"] = "application/json" }
+    })
 
     if ackSuccess then
         executedCommands[commandId] = true
@@ -869,11 +931,25 @@ local function dropItemByName(itemName, quantity)
 
     if not inventoryList then return end
     
-    local targetQty = tonumber(quantity) or 1
+    local targetQty = tonumber(quantity)
     local dropped = 0
     
     for _, item in ipairs(inventoryList:GetChildren()) do
         if item:IsA("GuiObject") and item.Name:lower() == itemName:lower() then
+            -- Allow "All" to drop the full stack amount if the UI exposes it.
+            if not targetQty then
+                local qStr = (type(quantity) == "string") and quantity:lower() or ""
+                if qStr == "all" then
+                    local qText = item:FindFirstChild("QuantityText", true)
+                    if qText and typeof(qText.Text) == "string" then
+                        local parsed = qText.Text:gsub("x", ""):gsub("%D", "")
+                        targetQty = tonumber(parsed)
+                    end
+                end
+            end
+
+            targetQty = targetQty or 1
+
             local order = item.LayoutOrder
             for i = 1, targetQty do
                 fireInventoryDrop(order)
@@ -884,6 +960,64 @@ local function dropItemByName(itemName, quantity)
         end
     end
     print("[DROP] Dropped " .. dropped .. "x " .. itemName)
+end
+
+local function walkToUntilWithin(targetPos, stopDistance)
+    -- Returns true if we actually reached the stopDistance, false if cancelled/aborted.
+    stopDistance = tonumber(stopDistance) or 3
+
+    -- Cancel any existing goto loops so this doesn't fight them.
+    stopGotoWalk()
+    stopFollowing()
+    stopMoveTween()
+    stopFollowTween()
+
+    local myToken = gotoWalkToken
+    beginForceAutoJump()
+
+    local reached = false
+    local ok, err = pcall(function()
+        local lastMoveTo = 0
+        while isRunning and myToken == gotoWalkToken do
+            RunService.Heartbeat:Wait()
+
+            local myChar = LocalPlayer.Character
+            local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+            local myHumanoid = myChar and myChar:FindFirstChildOfClass("Humanoid")
+
+            if myHumanoid and myHumanoid.SeatPart then
+                myHumanoid.Sit = false
+            end
+
+            if myRoot and myHumanoid then
+                local dist = (targetPos - myRoot.Position).Magnitude
+                if dist <= stopDistance then
+                    -- Stop pushing MoveTo once we're close enough.
+                    pcall(function()
+                        myHumanoid:Move(Vector3.new(0, 0, 0), false)
+                        myHumanoid:MoveTo(myRoot.Position)
+                    end)
+                    reached = true
+                    break
+                end
+
+                -- Refresh MoveTo periodically.
+                if os.clock() - lastMoveTo > WALKTO_REFRESH then
+                    lastMoveTo = os.clock()
+                    pcall(function()
+                        myHumanoid:MoveTo(targetPos)
+                    end)
+                end
+            end
+        end
+    end)
+
+    endForceAutoJump()
+    if not ok then
+        warn("[DROP] WalkTo loop error:", err)
+    end
+
+    return ok and reached
 end
 
 local function showInventoryManager()
@@ -910,8 +1044,7 @@ local function showInventoryManager()
     header.Size = UDim2.new(1, 0, 0, 50)
     header.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
     header.BorderSizePixel = 0
-    local hc = Instance.new("UICorner", header)
-    hc.CornerRadius = UDim.new(0, 12)
+    Instance.new("UICorner", header).CornerRadius = UDim.new(0, 12)
     
     local title = Instance.new("TextLabel", header)
     title.Size = UDim2.new(1, -60, 1, 0)
@@ -932,7 +1065,7 @@ local function showInventoryManager()
     close.Font = Enum.Font.GothamBold
     close.BackgroundTransparency = 1
     close.MouseButton1Click:Connect(function() screenGui:Destroy() end)
-
+    
     local refreshBtn = Instance.new("TextButton", header)
     refreshBtn.Size = UDim2.new(0, 80, 0, 30)
     refreshBtn.Position = UDim2.new(1, -140, 0, 10)
@@ -943,16 +1076,13 @@ local function showInventoryManager()
     refreshBtn.Font = Enum.Font.GothamBold
     Instance.new("UICorner", refreshBtn).CornerRadius = UDim.new(0, 6)
     
-    -- Forward declaration of fetchClients is needed if we use it here, 
-    -- but let's just make it call the local function defined later.
-    
-    -- ... (Container setup) ...
+    -- Main Container
     local container = Instance.new("Frame", mainFrame)
     container.Size = UDim2.new(1, -20, 1, -70)
     container.Position = UDim2.new(0, 10, 0, 60)
     container.BackgroundTransparency = 1
     
-    -- Left Panel (Clients)
+    -- Left Panel (Clients list)
     local leftPanel = Instance.new("ScrollingFrame", container)
     leftPanel.Size = UDim2.new(0.3, -5, 1, 0)
     leftPanel.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
@@ -962,21 +1092,133 @@ local function showInventoryManager()
     local leftLayout = Instance.new("UIListLayout", leftPanel)
     leftLayout.Padding = UDim.new(0, 5)
     
-    -- Right Panel (Content)
+    -- Right Panel (Views)
     local rightPanel = Instance.new("Frame", container)
     rightPanel.Size = UDim2.new(0.7, -5, 1, 0)
     rightPanel.Position = UDim2.new(0.3, 5, 0, 0)
-    rightPanel.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
-    rightPanel.BorderSizePixel = 0
-    Instance.new("UICorner", rightPanel).CornerRadius = UDim.new(0, 8)
+    rightPanel.BackgroundTransparency = 1
     
     local selectedClientId = nil
-    local currentCachedInventories = {} -- clientId -> item list
-    local resultsFrame = nil
+    local currentCachedInventories = {}
+
+    -- View 1: Global Search View
+    local globalView = Instance.new("Frame", rightPanel)
+    globalView.Size = UDim2.new(1, 0, 1, 0)
+    globalView.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+    globalView.BorderSizePixel = 0
+    Instance.new("UICorner", globalView).CornerRadius = UDim.new(0, 8)
+    
+    local searchLabel = Instance.new("TextLabel", globalView)
+    searchLabel.Size = UDim2.new(1, -20, 0, 30)
+    searchLabel.Position = UDim2.new(0, 10, 0, 10)
+    searchLabel.Text = "Global Inventory Search (Cached or Fresh Scan)"
+    searchLabel.TextColor3 = Color3.fromRGB(200, 200, 210)
+    searchLabel.TextSize = 14
+    searchLabel.Font = Enum.Font.GothamBold
+    searchLabel.BackgroundTransparency = 1
+    searchLabel.TextXAlignment = Enum.TextXAlignment.Left
+    
+    local searchBox = Instance.new("TextBox", globalView)
+    searchBox.Size = UDim2.new(1, -20, 0, 40)
+    searchBox.Position = UDim2.new(0, 10, 0, 45)
+    searchBox.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+    searchBox.Text = ""
+    searchBox.PlaceholderText = "Search item names..."
+    searchBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+    searchBox.Font = Enum.Font.Gotham
+    Instance.new("UICorner", searchBox)
+    
+    local resultsFrame = Instance.new("ScrollingFrame", globalView)
+    resultsFrame.Size = UDim2.new(1, -20, 1, -150)
+    resultsFrame.Position = UDim2.new(0, 10, 0, 95)
+    resultsFrame.BackgroundTransparency = 1
+    resultsFrame.ScrollBarThickness = 2
+    local resultsLayout = Instance.new("UIListLayout", resultsFrame)
+    resultsLayout.Padding = UDim.new(0, 2)
+    
+    local searchBtn = Instance.new("TextButton", globalView)
+    searchBtn.Size = UDim2.new(1, -20, 0, 40)
+    searchBtn.Position = UDim2.new(0, 10, 1, -50)
+    searchBtn.BackgroundColor3 = Color3.fromRGB(100, 150, 255)
+    searchBtn.Text = "FORCE GLOBAL SCAN"
+    searchBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    searchBtn.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", searchBtn)
+    
+    -- View 2: Client Selective View
+    local clientView = Instance.new("Frame", rightPanel)
+    clientView.Size = UDim2.new(1, 0, 1, 0)
+    clientView.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+    clientView.BorderSizePixel = 0
+    clientView.Visible = false
+    Instance.new("UICorner", clientView).CornerRadius = UDim.new(0, 8)
+    
+    local clientTitle = Instance.new("TextLabel", clientView)
+    clientTitle.Size = UDim2.new(1, -20, 0, 40)
+    clientTitle.Position = UDim2.new(0, 10, 0, 10)
+    clientTitle.TextColor3 = Color3.fromRGB(255, 200, 100)
+    clientTitle.TextSize = 16
+    clientTitle.Font = Enum.Font.GothamBold
+    clientTitle.BackgroundTransparency = 1
+    clientTitle.TextXAlignment = Enum.TextXAlignment.Left
+    
+    local dropName = Instance.new("TextBox", clientView)
+    dropName.Size = UDim2.new(1, -20, 0, 40)
+    dropName.Position = UDim2.new(0, 10, 0, 60)
+    dropName.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+    dropName.PlaceholderText = "Item Name to Drop"
+    dropName.Text = ""
+    dropName.TextColor3 = Color3.fromRGB(255, 255, 255)
+    dropName.Font = Enum.Font.Gotham
+    Instance.new("UICorner", dropName)
+    
+    local dropQty = Instance.new("TextBox", clientView)
+    dropQty.Size = UDim2.new(1, -20, 0, 40)
+    dropQty.Position = UDim2.new(0, 10, 0, 110)
+    dropQty.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+    dropQty.PlaceholderText = "Quantity (Default 1 or All)"
+    dropQty.Text = "1"
+    dropQty.TextColor3 = Color3.fromRGB(255, 255, 255)
+    dropQty.Font = Enum.Font.Gotham
+    Instance.new("UICorner", dropQty)
+    
+    local dropBtn = Instance.new("TextButton", clientView)
+    dropBtn.Size = UDim2.new(1, -20, 0, 50)
+    dropBtn.Position = UDim2.new(0, 10, 0, 170)
+    dropBtn.BackgroundColor3 = Color3.fromRGB(255, 100, 100)
+    dropBtn.Text = "DROP ITEM(S)"
+    dropBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    dropBtn.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", dropBtn)
+    
+    local deselectBtn = Instance.new("TextButton", clientView)
+    deselectBtn.Size = UDim2.new(1, -20, 0, 40)
+    deselectBtn.Position = UDim2.new(0, 10, 1, -50)
+    deselectBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+    deselectBtn.Text = "BACK TO GLOBAL SEARCH"
+    deselectBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+    deselectBtn.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", deselectBtn)
+
+    -- Logic Functions
+    local function updateViewVisibility()
+        if selectedClientId then
+            globalView.Visible = false
+            clientView.Visible = true
+            clientTitle.Text = "SOLDIER: " .. selectedClientId
+        else
+            globalView.Visible = true
+            clientView.Visible = false
+        end
+    end
     
     local function displayCachedInResults()
-        if not resultsFrame or selectedClientId then return end
-        resultsFrame:ClearAllChildren()
+        if not resultsFrame then return end
+        
+        -- Safe clear rows while keeping UIListLayout
+        for _, child in ipairs(resultsFrame:GetChildren()) do
+            if child:IsA("GuiObject") then child:Destroy() end
+        end
         
         local foundAny = false
         for cid, items in pairs(currentCachedInventories) do
@@ -991,20 +1233,27 @@ local function showInventoryManager()
                 nameLbl.Text = item.name or "Unknown"
                 nameLbl.TextColor3 = Color3.fromRGB(220, 220, 220)
                 nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+                nameLbl.Font = Enum.Font.Gotham
+                nameLbl.TextSize = 13
                 nameLbl.BackgroundTransparency = 1
                 
                 local clientLbl = Instance.new("TextLabel", itemRow)
                 clientLbl.Size = UDim2.new(0.3, 0, 1, 0)
                 clientLbl.Position = UDim2.new(0.4, 0, 0, 0)
-                clientLbl.Text = string.sub(cid, 1, 8)
+                clientLbl.Text = cid
                 clientLbl.TextColor3 = Color3.fromRGB(150, 150, 150)
+                clientLbl.Font = Enum.Font.Gotham
+                clientLbl.TextSize = 12
                 clientLbl.BackgroundTransparency = 1
                 
                 local qtyLbl = Instance.new("TextLabel", itemRow)
-                qtyLbl.Size = UDim2.new(0.2, 0, 1, 0)
+                qtyLbl.Size = UDim2.new(0.3, -5, 1, 0)
                 qtyLbl.Position = UDim2.new(0.7, 0, 0, 0)
                 qtyLbl.Text = "x" .. (item.quantity or 1)
                 qtyLbl.TextColor3 = Color3.fromRGB(100, 255, 100)
+                qtyLbl.TextXAlignment = Enum.TextXAlignment.Right
+                qtyLbl.Font = Enum.Font.GothamBold
+                qtyLbl.TextSize = 13
                 qtyLbl.BackgroundTransparency = 1
             end
         end
@@ -1012,145 +1261,20 @@ local function showInventoryManager()
         if not foundAny then
             local empty = Instance.new("TextLabel", resultsFrame)
             empty.Size = UDim2.new(1, 0, 0, 30)
-            empty.Text = "No cached inventories. Run a scan or wait for heartbeats."
+            empty.Text = "No cached inventories. Run a scan."
             empty.TextColor3 = Color3.fromRGB(120, 120, 120)
+            empty.Font = Enum.Font.Gotham
+            empty.TextSize = 12
             empty.BackgroundTransparency = 1
         end
     end
 
-    local function updateRightPanel()
-        for _, child in ipairs(rightPanel:GetChildren()) do
-            if not child:IsA("UICorner") then child:Destroy() end
-        end
-        
-        if not selectedClientId then
-            -- Global Search Mode
-            local searchLabel = Instance.new("TextLabel", rightPanel)
-            searchLabel.Size = UDim2.new(1, -20, 0, 30)
-            searchLabel.Position = UDim2.new(0, 10, 0, 10)
-            searchLabel.Text = "Global Inventory Search (Cached or Fresh Scan)"
-            searchLabel.TextColor3 = Color3.fromRGB(200, 200, 210)
-            searchLabel.TextSize = 14
-            searchLabel.Font = Enum.Font.GothamBold
-            searchLabel.BackgroundTransparency = 1
-            searchLabel.TextXAlignment = Enum.TextXAlignment.Left
-            
-            local searchBox = Instance.new("TextBox", rightPanel)
-            searchBox.Size = UDim2.new(1, -20, 0, 40)
-            searchBox.Position = UDim2.new(0, 10, 0, 45)
-            searchBox.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
-            searchBox.Text = ""
-            searchBox.PlaceholderText = "Search item names..."
-            searchBox.TextColor3 = Color3.fromRGB(255, 255, 255)
-            searchBox.Font = Enum.Font.Gotham
-            Instance.new("UICorner", searchBox)
-            
-            resultsFrame = Instance.new("ScrollingFrame", rightPanel)
-            resultsFrame.Size = UDim2.new(1, -20, 1, -150)
-            resultsFrame.Position = UDim2.new(0, 10, 0, 95)
-            resultsFrame.BackgroundTransparency = 1
-            resultsFrame.ScrollBarThickness = 2
-            local resultLayout = Instance.new("UIListLayout", resultsFrame)
-            resultLayout.Padding = UDim.new(0, 2)
-            
-            displayCachedInResults() -- Initial fill from cache
-            
-            local searchBtn = Instance.new("TextButton", rightPanel)
-            searchBtn.Size = UDim2.new(1, -20, 0, 40)
-            searchBtn.Position = UDim2.new(0, 10, 1, -50)
-            searchBtn.BackgroundColor3 = Color3.fromRGB(100, 150, 255)
-            searchBtn.Text = "FORCE GLOBAL SCAN"
-            searchBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-            searchBtn.Font = Enum.Font.GothamBold
-            Instance.new("UICorner", searchBtn)
-            
-            searchBtn.MouseButton1Click:Connect(function()
-                local query = searchBox.Text
-                sendCommand("inventory_report_all " .. query)
-                sendNotify("Inventory", "Global scan requested...")
-                
-                resultsFrame:ClearAllChildren()
-                local statusLabel = Instance.new("TextLabel", resultsFrame)
-                statusLabel.Size = UDim2.new(1, 0, 0, 30)
-                statusLabel.Text = "Broadcasting scan request..."
-                statusLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
-                statusLabel.Font = Enum.Font.Gotham
-                statusLabel.BackgroundTransparency = 1
-                -- The server will cache responses. Refreshing later will show them.
-            end)
-        else
-            -- Individual Client Mode
-            local clientTitle = Instance.new("TextLabel", rightPanel)
-            clientTitle.Size = UDim2.new(1, -20, 0, 40)
-            clientTitle.Position = UDim2.new(0, 10, 0, 10)
-            clientTitle.Text = "SOLDIER: " .. string.sub(selectedClientId, 1, 8)
-            clientTitle.TextColor3 = Color3.fromRGB(255, 200, 100)
-            clientTitle.TextSize = 16
-            clientTitle.Font = Enum.Font.GothamBold
-            clientTitle.BackgroundTransparency = 1
-            clientTitle.TextXAlignment = Enum.TextXAlignment.Left
-            
-            local dropName = Instance.new("TextBox", rightPanel)
-            dropName.Size = UDim2.new(1, -20, 0, 40)
-            dropName.Position = UDim2.new(0, 10, 0, 60)
-            dropName.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
-            dropName.PlaceholderText = "Item Name to Drop"
-            dropName.Text = ""
-            dropName.TextColor3 = Color3.fromRGB(255, 255, 255)
-            dropName.Font = Enum.Font.Gotham
-            Instance.new("UICorner", dropName)
-            
-            local dropQty = Instance.new("TextBox", rightPanel)
-            dropQty.Size = UDim2.new(1, -20, 0, 40)
-            dropQty.Position = UDim2.new(0, 10, 0, 110)
-            dropQty.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
-            dropQty.PlaceholderText = "Quantity (Default 1)"
-            dropQty.Text = "1"
-            dropQty.TextColor3 = Color3.fromRGB(255, 255, 255)
-            dropQty.Font = Enum.Font.Gotham
-            Instance.new("UICorner", dropQty)
-            
-            local dropBtn = Instance.new("TextButton", rightPanel)
-            dropBtn.Size = UDim2.new(1, -20, 0, 50)
-            dropBtn.Position = UDim2.new(0, 10, 0, 170)
-            dropBtn.BackgroundColor3 = Color3.fromRGB(255, 100, 100)
-            dropBtn.Text = "DROP ITEM(S)"
-            dropBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-            dropBtn.Font = Enum.Font.GothamBold
-            Instance.new("UICorner", dropBtn)
-            
-            dropBtn.MouseButton1Click:Connect(function()
-                local name = dropName.Text
-                local qty = dropQty.Text
-                if name ~= "" then
-                    sendCommand("target_drop " .. selectedClientId .. " " .. name .. " " .. qty)
-                    sendNotify("Inventory", "Drop command sent to soldier")
-                end
-            end)
-            
-            local deselectBtn = Instance.new("TextButton", rightPanel)
-            deselectBtn.Size = UDim2.new(1, -20, 0, 40)
-            deselectBtn.Position = UDim2.new(0, 10, 1, -50)
-            deselectBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
-            deselectBtn.Text = "BACK TO GLOBAL SEARCH"
-            deselectBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
-            deselectBtn.Font = Enum.Font.GothamBold
-            Instance.new("UICorner", deselectBtn)
-            deselectBtn.MouseButton1Click:Connect(function() 
-                selectedClientId = nil
-                updateRightPanel()
-            end)
-        end
-    end
-    
     local function fetchAll()
-        local req = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
-        if not req then return end
+        if not networkRequest then return end
         
         task.spawn(function()
-            -- 1. Fetch Clients
-            local cres = req({Url = SERVER_URL .. "/clients", Method = "GET"})
-            if cres.StatusCode == 200 then
+            local success, cres = robustRequest({Url = SERVER_URL .. "/clients", Method = "GET"})
+            if success and cres.StatusCode == 200 then
                 local clientsList = HttpService:JSONDecode(cres.Body)
                 for _, child in ipairs(leftPanel:GetChildren()) do
                     if child:IsA("TextButton") then child:Destroy() end
@@ -1159,31 +1283,86 @@ local function showInventoryManager()
                     local btn = Instance.new("TextButton", leftPanel)
                     btn.Size = UDim2.new(1, -10, 0, 35)
                     btn.BackgroundColor3 = (selectedClientId == c.id) and Color3.fromRGB(100, 150, 255) or Color3.fromRGB(40, 40, 45)
-                    btn.Text = string.sub(c.id, 1, 12) .. (c.id == clientId and " (YOU)" or "")
+                    btn.Text = c.id .. (c.id == clientId and " (YOU)" or "")
                     btn.TextColor3 = Color3.fromRGB(255, 255, 255)
                     btn.Font = Enum.Font.Gotham
                     btn.TextSize = 12
                     Instance.new("UICorner", btn)
                     btn.MouseButton1Click:Connect(function()
                         selectedClientId = c.id
-                        updateRightPanel()
-                        fetchAll()
+                        updateViewVisibility()
+                        fetchAll() -- Refresh highlght
                     end)
                 end
             end
             
-            -- 2. Fetch Inventories
-            local ires = req({Url = SERVER_URL .. "/inventories", Method = "GET"})
-            if ires.StatusCode == 200 then
+            local successI, ires = robustRequest({Url = SERVER_URL .. "/inventories", Method = "GET"})
+            if successI and ires.StatusCode == 200 then
                 currentCachedInventories = HttpService:JSONDecode(ires.Body)
                 displayCachedInResults()
             end
         end)
     end
+
+    -- Event Connections (Permanent)
+    searchBtn.MouseButton1Click:Connect(function()
+        local query = searchBox.Text
+        sendCommand("inventory_report_all " .. query)
+        sendNotify("Inventory", "Global scan requested...")
+        
+        for _, child in ipairs(resultsFrame:GetChildren()) do
+            if child:IsA("GuiObject") then child:Destroy() end
+        end
+        local status = Instance.new("TextLabel", resultsFrame)
+        status.Size = UDim2.new(1, 0, 0, 30)
+        status.Text = "Broadcasting scan request..."
+        status.TextColor3 = Color3.fromRGB(150, 150, 150)
+        status.BackgroundTransparency = 1
+    end)
+    
+    dropBtn.MouseButton1Click:Connect(function()
+        local name = dropName.Text
+        local qty = dropQty.Text
+        if name == "" then
+            return
+        end
+
+        sendNotify("Drop", "Click where the soldier should walk to drop")
+        setPendingClick(Mouse.Button1Down:Connect(function()
+            if not Mouse.Hit then return end
+            local targetPos = Mouse.Hit.Position
+            local coordsStr = string.format("%.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
+
+            -- If no client is selected (or you selected yourself), do it locally for instant response.
+            if (not selectedClientId) or (selectedClientId == clientId) then
+                task.spawn(function()
+                    local reached = walkToUntilWithin(targetPos, 3)
+                    if reached then
+                        dropItemByName(name, qty)
+                    else
+                        sendNotify("Drop", "Cancelled before reaching drop point")
+                    end
+                end)
+                sendNotify("Inventory", "Walking to drop point (local)")
+            else
+                -- New command: target_drop_at <clientId> <x,y,z> <name...> <qty>
+                sendCommand("target_drop_at " .. selectedClientId .. " " .. coordsStr .. " " .. name .. " " .. qty)
+                sendNotify("Inventory", "Drop point sent to soldier")
+            end
+            cancelPendingClick()
+        end), nil)
+    end)
+    
+    deselectBtn.MouseButton1Click:Connect(function()
+        selectedClientId = nil
+        updateViewVisibility()
+    end)
     
     refreshBtn.MouseButton1Click:Connect(fetchAll)
+    
+    -- Initial Load
     fetchAll()
-    updateRightPanel()
+    updateViewVisibility()
 end
 
 local function performToolbarScan(targetName)
@@ -1329,6 +1508,25 @@ end
 local function terminateScript()
     isRunning = false
     sendNotify("Army Script", "Script Terminated")
+
+    -- Stop any ongoing behaviors immediately (even if connections are about to be disconnected).
+    stopMoveTween()
+    stopFollowTween()
+    toggleClicking(false)
+    cancelPendingClick()
+    stopFollowing()
+    stopGotoWalk()
+    moveTarget = nil
+
+    -- Best-effort: close auxiliary UI(s) created by this script.
+    pcall(function()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        local inv = pg and pg:FindFirstChild("ArmyInventoryManager")
+        if inv then inv:Destroy() end
+        local dlg = pg and pg:FindFirstChild("ArmySearchDialog")
+        if dlg then dlg:Destroy() end
+    end)
+
     for _, conn in ipairs(connections) do
         if conn then conn:Disconnect() end
     end
@@ -1338,8 +1536,6 @@ local function terminateScript()
     end
     isPanelOpen = false
     isCommander = false
-    stopFollowing()
-    stopGotoWalk()
 end
 
 
@@ -1588,6 +1784,24 @@ local function createPanel()
         end
     )
 
+    local observeToggle = createToggleCard(
+        "Observe Orders",
+        "Show server orders on the commander (no execution).",
+        function() return observeServerCommands end,
+        function(v)
+            observeServerCommands = v
+        end
+    )
+
+    local autoResendToggle = createToggleCard(
+        "Auto Resend",
+        "Re-send a command if it doesn't show up in Observe Orders.",
+        function() return autoResendIfNotObserved end,
+        function(v)
+            autoResendIfNotObserved = v
+        end
+    )
+
     local isSettingsOpen = false
     local function setSettingsOpen(open)
         if open == isSettingsOpen then return end
@@ -1600,6 +1814,8 @@ local function createPanel()
 
             autoJumpToggle.Set(autoJumpEnabled)
             debugToggle.Set(debugFollowCommands)
+            observeToggle.Set(observeServerCommands)
+            autoResendToggle.Set(autoResendIfNotObserved)
 
             -- Instant transition (no animation).
             settingsGroup.GroupTransparency = 0
@@ -2133,14 +2349,11 @@ local function createPanel()
                         
                         -- Fetch client list for counting
                         task.spawn(function()
-                            local request = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
-                            if request then
-                                local success, response = pcall(function()
-                                    return request({
-                                        Url = SERVER_URL .. "/clients",
-                                        Method = "GET"
-                                    })
-                                end)
+                            if networkRequest then
+                                local success, response = robustRequest({
+                                    Url = SERVER_URL .. "/clients",
+                                    Method = "GET"
+                                })
                                 
                                 if success and response and response.Body then
                                     local jsonSuccess, data = pcall(function()
@@ -2471,6 +2684,7 @@ table.insert(connections, UserInputService.InputBegan:Connect(function(input, pr
             sendNotify("Command", "Cancelled current order")
         end
     elseif input.KeyCode == Enum.KeyCode.F3 then
+        -- Terminate everything.
         terminateScript()
     end
 end))
@@ -2478,20 +2692,14 @@ end))
 
 -- Register client before polling starts
 task.wait(1)
-local registered = false
-for i = 1, 5 do
-    if registerClient() then
-        registered = true
-        break
-    end
-    task.wait(1)
-end
+-- One registration attempt. No retries.
+local registered = registerClient()
 
 if not registered then
     sendNotify("Warning", "Failed to register - running without ID")
 end
 
-sendNotify("Army Script", "Press G to toggle Panel | F3 to Exit")
+sendNotify("Army Script", "Press G to toggle Panel | F3 to Terminate")
 print("Army Soldier loaded - Press G for panel")
 
 -- Polling loop (Main Thread)
@@ -2504,21 +2712,18 @@ while isRunning do
     end
 
     -- Enhanced polling with ETag support
-    local request = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
     local success, response
 
-    if request then
+    if networkRequest then
         local headers = {}
         if lastETag then
             headers["If-None-Match"] = lastETag
         end
-        success, response = pcall(function()
-            return request({
-                Url = SERVER_URL .. "/",
-                Method = "GET",
-                Headers = headers
-            })
-        end)
+        success, response = robustRequest({
+            Url = SERVER_URL .. "/",
+            Method = "GET",
+            Headers = headers
+        }) -- Retries disabled
     else
         -- Fallback to game:HttpGet
         success, response = pcall(function()
@@ -2548,6 +2753,7 @@ while isRunning do
                 if not executedCommands[commandId] then
                     lastCommandId = commandId
                     local action = data.action
+                    recordObservedAction(action)
                     
                     consecutiveNoChange = 0
                     currentPollRate = MIN_POLL_RATE
@@ -2556,6 +2762,13 @@ while isRunning do
                         -- By default, the commander does NOT obey server-issued commands.
                         -- Enable `debugFollowCommands` if you want the commander to follow commands too.
                         local shouldExecute = (action ~= "wait") and (not isCommander or debugFollowCommands)
+
+                        -- Even if we don't execute on commander, still show what came back from the server
+                        -- so you can verify the command actually made it through.
+                        if isCommander and observeServerCommands and (action ~= "wait") then
+                            sendNotify("Order Received", action)
+                        end
+
                         if shouldExecute then
                             sendNotify("New Order", action)
 
@@ -2569,15 +2782,45 @@ while isRunning do
                                 -- BOOGA BOOGA ACTIONS --
                                 if string.sub(action, 1, 21) == "inventory_report_all " then
                                     local query = string.sub(action, 22)
-                                    local report = getInventoryReport(query)
-                                    acknowledgeCommand(commandId, true, report)
+                                    local reportJson = getInventoryReport(query)
+                                    local reportPayload = reportJson
+
+                                    -- Prefer sending a decoded table (real JSON) if possible, so the server
+                                    -- doesn't have to JSON-decode a string inside JSON.
+                                    pcall(function()
+                                        reportPayload = HttpService:JSONDecode(reportJson)
+                                    end)
+
+                                    acknowledgeCommand(commandId, true, reportPayload)
+                                    return true
+                                elseif string.sub(action, 1, 15) == "target_drop_at " then
+                                    -- Format: target_drop_at <clientId> <x,y,z> <name...> <qty>
+                                    local parts = string.split(action, " ")
+                                    if parts[2] == clientId then
+                                        local coordsStr = parts[3]
+                                        local qty = parts[#parts]
+                                        local name = table.concat(parts, " ", 4, math.max(4, #parts - 1))
+
+                                        local coords = string.split(coordsStr or "", ",")
+                                        if #coords == 3 then
+                                            local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
+                                            -- Walk until we're close, then start dropping.
+                                            local reached = walkToUntilWithin(targetPos, 3)
+                                            if reached then
+                                                dropItemByName(name, qty)
+                                            else
+                                                warn("[DROP] Cancelled/aborted before reaching drop point; not dropping.")
+                                            end
+                                        end
+                                    end
                                     return true
                                 elseif string.sub(action, 1, 12) == "target_drop " then
                                     -- Format: target_drop <clientId> <name> <qty>
                                     local parts = string.split(action, " ")
                                     if parts[2] == clientId then
-                                        local name = parts[3]
-                                        local qty = parts[4]
+                                        -- Item names can contain spaces, e.g. "Raw Iron". Treat the last token as qty.
+                                        local qty = parts[#parts]
+                                        local name = table.concat(parts, " ", 3, math.max(3, #parts - 1))
                                         dropItemByName(name, qty)
                                     end
                                     return true

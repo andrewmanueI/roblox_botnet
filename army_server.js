@@ -335,7 +335,20 @@ const server = http.createServer((req, res) => {
             req.on('data', chunk => { body += chunk.toString(); });
             req.on('end', () => {
                 try {
-                    const { clientId, commandId, success = true, error = null } = JSON.parse(body);
+                    const parsed = JSON.parse(body);
+                    const clientId = parsed.clientId;
+                    const commandId = parsed.commandId;
+                    const success = (parsed.success === undefined) ? true : parsed.success;
+
+                    // Inventory reports have historically been sent in `error` even on success.
+                    // Newer clients may send them in `result` / `report`.
+                    const error = (parsed.error === undefined) ? null : parsed.error;
+                    const result = (parsed.result !== undefined) ? parsed.result
+                        : (parsed.report !== undefined) ? parsed.report
+                        : (parsed.data !== undefined) ? parsed.data
+                        : null;
+
+                    const payloadRaw = (result !== null && result !== undefined) ? result : error;
                     const client = clients.get(clientId);
 
                     if (!client) {
@@ -353,7 +366,9 @@ const server = http.createServer((req, res) => {
                     client.lastCommandId = commandId;
                     client.lastSeen = Date.now();
 
-                    console.log(`[ACK] Client ${clientId} executed command ${commandId} ${success ? 'successfully' : 'failed'}${error ? ': ' + error : ''}`);
+                    // Avoid "[object Object]" spam on JSON payloads.
+                    const logPayload = (typeof payloadRaw === 'string') ? payloadRaw : (payloadRaw ? '[json]' : '');
+                    console.log(`[ACK] Client ${clientId} executed command ${commandId} ${success ? 'successfully' : 'failed'}${logPayload ? ': ' + logPayload : ''}`);
 
                     // Record in command history
                     const command = commandHistory.get(commandId);
@@ -362,11 +377,11 @@ const server = http.createServer((req, res) => {
                             command.executedBy = [];
                         }
                         
-                        // Try to parse the error field as JSON (relay data)
-                        let processedError = error;
-                        if (typeof error === 'string' && (error.startsWith('[') || error.startsWith('{'))) {
+                        // Try to parse payload as JSON (relay data)
+                        let processedPayload = payloadRaw;
+                        if (typeof payloadRaw === 'string' && (payloadRaw.startsWith('[') || payloadRaw.startsWith('{'))) {
                             try {
-                                processedError = JSON.parse(error);
+                                processedPayload = JSON.parse(payloadRaw);
                             } catch (e) {
                                 // Not valid JSON, keep as string
                             }
@@ -376,15 +391,15 @@ const server = http.createServer((req, res) => {
                             clientId,
                             executedAt: Date.now(),
                             success,
-                            data: processedError, // Store as 'data' for clarity if JSON
-                            error: typeof processedError === 'string' ? processedError : null,
+                            data: processedPayload, // Store as 'data' for clarity if JSON
+                            error: (success ? null : (typeof processedPayload === 'string' ? processedPayload : null)),
                             lastSeen: client ? client.lastSeen : null
                         });
 
                         // Cache inventory if this was a report command
-                        if (command.action.startsWith('inventory_report_all') && processedError && typeof processedError === 'object') {
+                        if (command.action.startsWith('inventory_report_all') && processedPayload && typeof processedPayload === 'object') {
                             clientInventories.set(clientId, {
-                                data: processedError,
+                                data: processedPayload,
                                 timestamp: Date.now()
                             });
                         }
