@@ -1151,6 +1151,7 @@ local function createPanel()
                         end), function()
                             clearHighlights(highlights)
                         end)
+                    end
                 end
             },
             {
@@ -1270,6 +1271,7 @@ local function createPanel()
                                 clearHolographicCubes()
                             end)
                         end)
+                    end
                 end
             },
             {
