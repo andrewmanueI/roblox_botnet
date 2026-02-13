@@ -15,7 +15,7 @@ const crypto = require('crypto');
 const commandHistory = new Map(); // commandId -> { id, action, time, type, executedBy }
 const MAX_HISTORY = 100;
 let impulseTimer = null;
-
+const clientInventories = new Map(); // clientId -> { data, timestamp }
 // Formation state
 let formationState = {
     active: false,
@@ -196,6 +196,17 @@ const server = http.createServer((req, res) => {
             return;
         }
 
+        // List cached inventories endpoint
+        if (req.url === '/inventories') {
+            const inventoryData = {};
+            for (const [clientId, info] of clientInventories.entries()) {
+                inventoryData[clientId] = info.data;
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(inventoryData));
+            return;
+        }
+
         // Server status endpoint
         if (req.url === '/status') {
             const recentCommands = [];
@@ -359,6 +370,14 @@ const server = http.createServer((req, res) => {
                             error: typeof processedError === 'string' ? processedError : null,
                             lastSeen: client ? client.lastSeen : null
                         });
+
+                        // Cache inventory if this was a report command
+                        if (command.action.startsWith('inventory_report_all') && processedError && typeof processedError === 'object') {
+                            clientInventories.set(clientId, {
+                                data: processedError,
+                                timestamp: Date.now()
+                            });
+                        }
                     }
 
                     res.writeHead(200);
@@ -513,6 +532,14 @@ setInterval(() => {
     const activeClients = Array.from(clients.values()).filter(
         c => now - c.lastSeen < 10000
     ).length;
+
+    // Cleanup inventories older than 1 minute
+    const INVENTORY_TIMEOUT = 60000;
+    for (const [clientId, info] of clientInventories.entries()) {
+        if (now - info.timestamp > INVENTORY_TIMEOUT) {
+            clientInventories.delete(clientId);
+        }
+    }
 
     if (latestCommand.id > 0) {
         const command = commandHistory.get(latestCommand.id);

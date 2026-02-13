@@ -872,7 +872,7 @@ local function dropItemByName(itemName, quantity)
             for i = 1, targetQty do
                 fireInventoryDrop(order)
                 dropped = dropped + 1
-                task.wait(0.05)
+                task.wait(0.2)
             end
             break
         end
@@ -965,7 +965,53 @@ local function showInventoryManager()
     Instance.new("UICorner", rightPanel).CornerRadius = UDim.new(0, 8)
     
     local selectedClientId = nil
+    local currentCachedInventories = {} -- clientId -> item list
+    local resultsFrame = nil
     
+    local function displayCachedInResults()
+        if not resultsFrame or selectedClientId then return end
+        resultsFrame:ClearAllChildren()
+        
+        local foundAny = false
+        for cid, items in pairs(currentCachedInventories) do
+            foundAny = true
+            for _, item in ipairs(items) do
+                local itemRow = Instance.new("Frame", resultsFrame)
+                itemRow.Size = UDim2.new(1, 0, 0, 30)
+                itemRow.BackgroundTransparency = 1
+                
+                local nameLbl = Instance.new("TextLabel", itemRow)
+                nameLbl.Size = UDim2.new(0.4, 0, 1, 0)
+                nameLbl.Text = item.name or "Unknown"
+                nameLbl.TextColor3 = Color3.fromRGB(220, 220, 220)
+                nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+                nameLbl.BackgroundTransparency = 1
+                
+                local clientLbl = Instance.new("TextLabel", itemRow)
+                clientLbl.Size = UDim2.new(0.3, 0, 1, 0)
+                clientLbl.Position = UDim2.new(0.4, 0, 0, 0)
+                clientLbl.Text = string.sub(cid, 1, 8)
+                clientLbl.TextColor3 = Color3.fromRGB(150, 150, 150)
+                clientLbl.BackgroundTransparency = 1
+                
+                local qtyLbl = Instance.new("TextLabel", itemRow)
+                qtyLbl.Size = UDim2.new(0.2, 0, 1, 0)
+                qtyLbl.Position = UDim2.new(0.7, 0, 0, 0)
+                qtyLbl.Text = "x" .. (item.quantity or 1)
+                qtyLbl.TextColor3 = Color3.fromRGB(100, 255, 100)
+                qtyLbl.BackgroundTransparency = 1
+            end
+        end
+        
+        if not foundAny then
+            local empty = Instance.new("TextLabel", resultsFrame)
+            empty.Size = UDim2.new(1, 0, 0, 30)
+            empty.Text = "No cached inventories. Run a scan or wait for heartbeats."
+            empty.TextColor3 = Color3.fromRGB(120, 120, 120)
+            empty.BackgroundTransparency = 1
+        end
+    end
+
     local function updateRightPanel()
         for _, child in ipairs(rightPanel:GetChildren()) do
             if not child:IsA("UICorner") then child:Destroy() end
@@ -976,7 +1022,7 @@ local function showInventoryManager()
             local searchLabel = Instance.new("TextLabel", rightPanel)
             searchLabel.Size = UDim2.new(1, -20, 0, 30)
             searchLabel.Position = UDim2.new(0, 10, 0, 10)
-            searchLabel.Text = "Global Inventory Search (Across all soldiers)"
+            searchLabel.Text = "Global Inventory Search (Cached or Fresh Scan)"
             searchLabel.TextColor3 = Color3.fromRGB(200, 200, 210)
             searchLabel.TextSize = 14
             searchLabel.Font = Enum.Font.GothamBold
@@ -988,12 +1034,12 @@ local function showInventoryManager()
             searchBox.Position = UDim2.new(0, 10, 0, 45)
             searchBox.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
             searchBox.Text = ""
-            searchBox.PlaceholderText = "Search items (case insensitive)..."
+            searchBox.PlaceholderText = "Search item names..."
             searchBox.TextColor3 = Color3.fromRGB(255, 255, 255)
             searchBox.Font = Enum.Font.Gotham
             Instance.new("UICorner", searchBox)
             
-            local resultsFrame = Instance.new("ScrollingFrame", rightPanel)
+            resultsFrame = Instance.new("ScrollingFrame", rightPanel)
             resultsFrame.Size = UDim2.new(1, -20, 1, -150)
             resultsFrame.Position = UDim2.new(0, 10, 0, 95)
             resultsFrame.BackgroundTransparency = 1
@@ -1001,11 +1047,13 @@ local function showInventoryManager()
             local resultLayout = Instance.new("UIListLayout", resultsFrame)
             resultLayout.Padding = UDim.new(0, 2)
             
+            displayCachedInResults() -- Initial fill from cache
+            
             local searchBtn = Instance.new("TextButton", rightPanel)
             searchBtn.Size = UDim2.new(1, -20, 0, 40)
             searchBtn.Position = UDim2.new(0, 10, 1, -50)
             searchBtn.BackgroundColor3 = Color3.fromRGB(100, 150, 255)
-            searchBtn.Text = "RUN GLOBAL SCAN"
+            searchBtn.Text = "FORCE GLOBAL SCAN"
             searchBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
             searchBtn.Font = Enum.Font.GothamBold
             Instance.new("UICorner", searchBtn)
@@ -1018,78 +1066,11 @@ local function showInventoryManager()
                 resultsFrame:ClearAllChildren()
                 local statusLabel = Instance.new("TextLabel", resultsFrame)
                 statusLabel.Size = UDim2.new(1, 0, 0, 30)
-                statusLabel.Text = "Scanning soldiers..."
+                statusLabel.Text = "Broadcasting scan request..."
                 statusLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
                 statusLabel.Font = Enum.Font.Gotham
                 statusLabel.BackgroundTransparency = 1
-                
-                task.spawn(function()
-                    local req = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
-                    if not req then return end
-                    
-                    -- 1. Get current command ID to track
-                    local res = req({Url = SERVER_URL .. "/status", Method = "GET"})
-                    if res.StatusCode ~= 200 then return end
-                    local statusData = HttpService:JSONDecode(res.Body)
-                    local trackCmdId = statusData.server.latestCommandId
-                    
-                    -- 2. Poll for 5 seconds to collect responses
-                    local foundAny = false
-                    for i = 1, 10 do
-                        task.wait(0.5)
-                        local cmdRes = req({Url = SERVER_URL .. "/command/" .. trackCmdId, Method = "GET"})
-                        if cmdRes.StatusCode == 200 then
-                            local cmdData = HttpService:JSONDecode(cmdRes.Body)
-                            resultsFrame:ClearAllChildren()
-                            foundAny = false
-                            
-                            for _, exec in ipairs(cmdData.executedBy or {}) do
-                                local reportData = exec.data
-                                if type(reportData) == "table" then
-                                    foundAny = true
-                                    for _, item in ipairs(reportData) do
-                                        local itemRow = Instance.new("Frame", resultsFrame)
-                                        itemRow.Size = UDim2.new(1, 0, 0, 30)
-                                        itemRow.BackgroundTransparency = 1
-                                        
-                                        local nameLbl = Instance.new("TextLabel", itemRow)
-                                        nameLbl.Size = UDim2.new(0.4, 0, 1, 0)
-                                        nameLbl.Text = item.name
-                                        nameLbl.TextColor3 = Color3.fromRGB(220, 220, 220)
-                                        nameLbl.TextXAlignment = Enum.TextXAlignment.Left
-                                        nameLbl.BackgroundTransparency = 1
-                                        
-                                        local clientLbl = Instance.new("TextLabel", itemRow)
-                                        clientLbl.Size = UDim2.new(0.3, 0, 1, 0)
-                                        clientLbl.Position = UDim2.new(0.4, 0, 0, 0)
-                                        clientLbl.Text = string.sub(exec.clientId, 1, 8)
-                                        clientLbl.TextColor3 = Color3.fromRGB(150, 150, 150)
-                                        clientLbl.BackgroundTransparency = 1
-                                        
-                                        local qtyLbl = Instance.new("TextLabel", itemRow)
-                                        qtyLbl.Size = UDim2.new(0.2, 0, 1, 0)
-                                        qtyLbl.Position = UDim2.new(0.7, 0, 0, 0)
-                                        qtyLbl.Text = "x" .. (item.quantity or 1)
-                                        qtyLbl.TextColor3 = Color3.fromRGB(100, 255, 100)
-                                        qtyLbl.BackgroundTransparency = 1
-                                    end
-                                end
-                            end
-                            
-                            if not foundAny then
-                                local waitLabel = Instance.new("TextLabel", resultsFrame)
-                                waitLabel.Size = UDim2.new(1, 0, 0, 30)
-                                waitLabel.Text = "Waiting for soldiers to report... (" .. i .. ")"
-                                waitLabel.TextColor3 = Color3.fromRGB(120, 120, 120)
-                                waitLabel.BackgroundTransparency = 1
-                            end
-                        end
-                    end
-                    
-                    if not foundAny then
-                        statusLabel.Text = "No items found or soldiers timed out."
-                    end
-                end)
+                -- The server will cache responses. Refreshing later will show them.
             end)
         else
             -- Individual Client Mode
@@ -1156,40 +1137,46 @@ local function showInventoryManager()
         end
     end
     
-    local function fetchClients()
-        for _, child in ipairs(leftPanel:GetChildren()) do
-            if child:IsA("TextButton") then child:Destroy() end
-        end
-        
+    local function fetchAll()
         local req = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
-        if req then
-            task.spawn(function()
-                local res = req({Url = SERVER_URL .. "/clients", Method = "GET"})
-                if res.StatusCode == 200 then
-                    local clientsList = HttpService:JSONDecode(res.Body)
-                    for _, c in ipairs(clientsList) do
-                        local btn = Instance.new("TextButton", leftPanel)
-                        btn.Size = UDim2.new(1, -10, 0, 35)
-                        btn.BackgroundColor3 = (selectedClientId == c.id) and Color3.fromRGB(100, 150, 255) or Color3.fromRGB(40, 40, 45)
-                        btn.Text = string.sub(c.id, 1, 12) .. (c.id == clientId and " (YOU)" or "")
-                        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-                        btn.Font = Enum.Font.Gotham
-                        btn.TextSize = 12
-                        Instance.new("UICorner", btn)
-                        
-                        btn.MouseButton1Click:Connect(function()
-                            selectedClientId = c.id
-                            updateRightPanel()
-                            fetchClients()
-                        end)
-                    end
+        if not req then return end
+        
+        task.spawn(function()
+            -- 1. Fetch Clients
+            local cres = req({Url = SERVER_URL .. "/clients", Method = "GET"})
+            if cres.StatusCode == 200 then
+                local clientsList = HttpService:JSONDecode(cres.Body)
+                for _, child in ipairs(leftPanel:GetChildren()) do
+                    if child:IsA("TextButton") then child:Destroy() end
                 end
-            end)
-        end
+                for _, c in ipairs(clientsList) do
+                    local btn = Instance.new("TextButton", leftPanel)
+                    btn.Size = UDim2.new(1, -10, 0, 35)
+                    btn.BackgroundColor3 = (selectedClientId == c.id) and Color3.fromRGB(100, 150, 255) or Color3.fromRGB(40, 40, 45)
+                    btn.Text = string.sub(c.id, 1, 12) .. (c.id == clientId and " (YOU)" or "")
+                    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+                    btn.Font = Enum.Font.Gotham
+                    btn.TextSize = 12
+                    Instance.new("UICorner", btn)
+                    btn.MouseButton1Click:Connect(function()
+                        selectedClientId = c.id
+                        updateRightPanel()
+                        fetchAll()
+                    end)
+                end
+            end
+            
+            -- 2. Fetch Inventories
+            local ires = req({Url = SERVER_URL .. "/inventories", Method = "GET"})
+            if ires.StatusCode == 200 then
+                currentCachedInventories = HttpService:JSONDecode(ires.Body)
+                displayCachedInResults()
+            end
+        end)
     end
     
-    refreshBtn.MouseButton1Click:Connect(fetchClients)
-    fetchClients()
+    refreshBtn.MouseButton1Click:Connect(fetchAll)
+    fetchAll()
     updateRightPanel()
 end
 
@@ -2690,7 +2677,7 @@ while isRunning do
                                 elseif action == "unequip_all" then
                                     for slot = 1, 6 do
                                         fireInventoryStore(slot)
-                                        task.wait(0.1)
+                                        task.wait(0.2)
                                     end
                                     print("[UNEQUIP] All slots cleared to inventory")
                                 elseif string.sub(action, 1, 11) == "sync_equip " then
