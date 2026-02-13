@@ -54,14 +54,23 @@ local function endForceAutoJump()
     autoJumpForceCount = math.max(0, autoJumpForceCount - 1)
 end
 local gotoWalkToken = 0 -- increments to cancel any active goto walk loop
-local debugFollowCommands = false -- When true, commander will also execute server commands.
+local debugFollowCommands = true -- When true, commander will also execute server commands.
 local observeServerCommands = true -- When true, commander shows a notification when an order is received.
-local autoResendIfNotObserved = false -- If true, commander will re-send commands that don't come back from server.
-local AUTO_RESEND_TIMEOUT = 1.25 -- seconds to wait for the command to show up via polling before re-sending
+local autoResendIfNotObserved = true -- If true, commander will re-send commands that don't come back from server.
+local AUTO_RESEND_TIMEOUT = 1.5 -- seconds to wait for the command to show up via polling before re-sending
 local AUTO_RESEND_MAX = 1 -- number of re-sends (in addition to the first send)
 local receivedActionAt = {} -- [actionString] = os.clock() timestamp when last observed from server
 local pendingMouseClickConnection = nil -- used for click-to-target modes; cancel should close it
 local pendingMouseClickCleanup = nil -- optional cleanup for pending click mode (e.g. clear highlights)
+
+-- Server Configuration Sync
+local serverConfigs = {
+    auto_pickup = false,
+    pickup_whitelist = {}
+}
+local PICKUP_RANGE = 30
+local lastConfigSync = 0
+local CONFIG_SYNC_INTERVAL = 5 -- seconds
 local CANCEL_COOLDOWN = 0.35 -- seconds; prevents spamming cancel key
 local lastCancelTime = 0
 
@@ -274,6 +283,138 @@ sendCommand = function(cmd)
         end)
     end
 end
+
+local function fetchServerConfigs()
+    if not networkRequest then return false end
+    
+    local success, response = robustRequest({
+        Url = SERVER_URL .. "/config",
+        Method = "GET"
+    })
+    
+    if success and response and response.Body then
+        local jsonSuccess, data = pcall(function()
+            return HttpService:JSONDecode(response.Body)
+        end)
+        
+        if jsonSuccess and data then
+            serverConfigs.auto_pickup = data.auto_pickup or false
+            serverConfigs.pickup_whitelist = data.pickup_whitelist or {}
+            return true
+        end
+    end
+    return false
+end
+
+local function updateServerConfig(newConfig)
+    if not networkRequest then return false end
+    
+    local success = robustRequest({
+        Url = SERVER_URL .. "/config",
+        Method = "POST",
+        Body = HttpService:JSONEncode(newConfig),
+        Headers = { ["Content-Type"] = "application/json" }
+    })
+    
+    if success then
+        -- Update local cache immediately
+        if newConfig.auto_pickup ~= nil then serverConfigs.auto_pickup = newConfig.auto_pickup end
+        if newConfig.pickup_whitelist ~= nil then serverConfigs.pickup_whitelist = newConfig.pickup_whitelist end
+    end
+    
+    return success
+end
+
+-- PICKUP LOGIC --
+local pickupPacketId = 213 -- Fallback
+
+local function getPickupPacketId()
+    local ok, result = pcall(function()
+        local ByteNetModule = ReplicatedStorage:FindFirstChild("Modules", true) and ReplicatedStorage.Modules:FindFirstChild("ByteNet")
+        if not ByteNetModule then return nil end
+        
+        local Replicated = ByteNetModule:FindFirstChild("replicated")
+        local values = Replicated and Replicated:FindFirstChild("values")
+        if not values then return nil end
+        
+        local Values = require(values)
+        local boogaData = Values.access("booga"):read()
+        return boogaData and boogaData.packets and boogaData.packets.Pickup
+    end)
+    if ok and result then
+        pickupPacketId = result
+        print("[PICKUP] Dynamic Packet ID found: " .. pickupPacketId)
+    else
+        warn("[PICKUP] Using fallback Packet ID: " .. pickupPacketId)
+    end
+end
+
+local function firePickup(item)
+    if not item then return end
+    local entityID = item:GetAttribute("EntityID")
+    if not entityID then return end
+
+    local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
+    if not ByteNetRemote then return end
+
+    -- Create 6-byte buffer: [0][packetID][u32(entityID)]
+    local b = buffer.create(6)
+    buffer.writeu8(b, 0, 0)
+    buffer.writeu8(b, 1, pickupPacketId)
+    buffer.writeu32(b, 2, entityID)
+    
+    ByteNetRemote:FireServer(b)
+end
+
+local function isItemWhitelisted(name)
+    if not serverConfigs.pickup_whitelist or #serverConfigs.pickup_whitelist == 0 then
+        return true
+    end
+    local lowerName = name:lower()
+    for _, allowed in ipairs(serverConfigs.pickup_whitelist) do
+        if lowerName:find(allowed:lower(), 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+task.spawn(function()
+    getPickupPacketId()
+    
+    while isRunning do
+        if serverConfigs.auto_pickup then
+            local char = LocalPlayer.Character
+            local root = char and char:FindFirstChild("HumanoidRootPart")
+            local itemsFolder = workspace:FindFirstChild("Items")
+            
+            if root and itemsFolder then
+                for _, item in ipairs(itemsFolder:GetChildren()) do
+                    if item:GetAttribute("EntityID") then
+                        local pos = item:IsA("BasePart") and item.Position or (item:IsA("Model") and item.PrimaryPart and item.PrimaryPart.Position)
+                        if pos and (root.Position - pos).Magnitude <= PICKUP_RANGE then
+                            if isItemWhitelisted(item.Name) then
+                                firePickup(item)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        task.wait(0.5)
+    end
+end)
+
+-- Periodically sync config from server
+task.spawn(function()
+    while isRunning do
+        if os.clock() - lastConfigSync >= CONFIG_SYNC_INTERVAL then
+            fetchServerConfigs()
+            lastConfigSync = os.clock()
+        end
+        task.wait(1)
+    end
+end)
 
 local function registerClient()
     if not networkRequest then return false end
@@ -924,47 +1065,113 @@ local function getInventoryReport(query)
 end
 
 local function dropItemByName(itemName, quantity)
+    local results = {}
     local inventoryList = LocalPlayer.PlayerGui:FindFirstChild("MainGui", true)
         and LocalPlayer.PlayerGui.MainGui:FindFirstChild("RightPanel", true)
         and LocalPlayer.PlayerGui.MainGui.RightPanel:FindFirstChild("Inventory", true)
         and LocalPlayer.PlayerGui.MainGui.RightPanel.Inventory:FindFirstChild("List", true)
 
-    if not inventoryList then return end
+    if not inventoryList then 
+        sendNotify("Drop Error", "Could not find inventory list UI")
+        return 
+    end
     
     local targetQty = tonumber(quantity)
     local dropped = 0
+    local foundItem = nil
     
+    -- Robust matching: check frame name or any inner text labels
     for _, item in ipairs(inventoryList:GetChildren()) do
-        if item:IsA("GuiObject") and item.Name:lower() == itemName:lower() then
-            -- Allow "All" to drop the full stack amount if the UI exposes it.
-            if not targetQty then
-                local qStr = (type(quantity) == "string") and quantity:lower() or ""
-                if qStr == "all" then
-                    local qText = item:FindFirstChild("QuantityText", true)
-                    if qText and typeof(qText.Text) == "string" then
-                        local parsed = qText.Text:gsub("x", ""):gsub("%D", "")
-                        targetQty = tonumber(parsed)
+        if item:IsA("GuiObject") and item.Name ~= "UIListLayout" then
+            local matches = false
+            if item.Name:lower() == itemName:lower() then
+                matches = true
+            else
+                -- Check inner labels (sometimes the frame is just "Item" or a number)
+                for _, sub in ipairs(item:GetDescendants()) do
+                    if sub:IsA("TextLabel") and sub.Text:lower():find(itemName:lower(), 1, true) then
+                        matches = true
+                        break
                     end
                 end
             end
 
-            targetQty = targetQty or 1
+            if matches then
+                foundItem = item
+                if not targetQty then
+                    local qStr = (type(quantity) == "string") and quantity:lower() or ""
+                    if qStr == "all" then
+                        local qText = item:FindFirstChild("QuantityText", true)
+                        if qText and typeof(qText.Text) == "string" then
+                            local parsed = qText.Text:gsub("x", ""):gsub("%D", "")
+                            targetQty = tonumber(parsed)
+                        end
+                    end
+                end
 
-            local order = item.LayoutOrder
-            for i = 1, targetQty do
-                fireInventoryDrop(order)
-                dropped = dropped + 1
-                task.wait(0.2)
+                targetQty = targetQty or 1
+                local order = item.LayoutOrder
+                
+                sendNotify("Drop", "Dropping " .. targetQty .. "x " .. (item.Name or itemName))
+                
+                local function getQty()
+                    if not item or not item.Parent then return 0 end
+                    local qText = item:FindFirstChild("QuantityText", true)
+                    if qText and qText.Text ~= "" then
+                        local txt = qText.Text:gsub("x", ""):gsub("%D", "")
+                        return tonumber(txt) or 1
+                    end
+                    return 1 -- Assume 1 if it exists but no visible quantity text
+                end
+
+                for i = 1, targetQty do
+                    local before = getQty()
+                    fireInventoryDrop(order)
+                    
+                    local verified = false
+                    -- Wait 0.05s baseline
+                    task.wait(0.05)
+                    
+                    -- Check if it decreased. If not, wait a bit more for replication
+                    if getQty() < before then
+                        verified = true
+                    else
+                        for attempt = 1, 5 do
+                            task.wait(0.05)
+                            if getQty() < before then
+                                verified = true
+                                break
+                            end
+                        end
+                    end
+                    
+                    if not verified then
+                        warn("[DROP] Verification failed for " .. itemName .. " at " .. i)
+                        sendNotify("Verify Fail", "Drop lag detected. Stopping for safety.")
+                        break
+                    end
+                    dropped = dropped + 1
+                end
+                break
             end
-            break
         end
     end
+
+    if dropped > 0 then
+        sendNotify("Success", "Successfully dropped " .. dropped .. "x " .. itemName)
+    elseif not foundItem then
+        sendNotify("Error", "Item '" .. itemName .. "' not found in inventory")
+    else
+        sendNotify("Error", "Found item but failed to drop")
+    end
+    
     print("[DROP] Dropped " .. dropped .. "x " .. itemName)
 end
 
 local function walkToUntilWithin(targetPos, stopDistance)
     -- Returns true if we actually reached the stopDistance, false if cancelled/aborted.
-    stopDistance = tonumber(stopDistance) or 3
+    stopDistance = tonumber(stopDistance) or 6
+    local STOP_TOLERANCE = 0.1 -- studs; allow minor overshoot/latency before considering it "reached"
 
     -- Cancel any existing goto loops so this doesn't fight them.
     stopGotoWalk()
@@ -976,6 +1183,7 @@ local function walkToUntilWithin(targetPos, stopDistance)
     beginForceAutoJump()
 
     local reached = false
+    local lastDist = math.huge
     local ok, err = pcall(function()
         local lastMoveTo = 0
         while isRunning and myToken == gotoWalkToken do
@@ -990,7 +1198,8 @@ local function walkToUntilWithin(targetPos, stopDistance)
             end
 
             if myRoot and myHumanoid then
-                local dist = (targetPos - myRoot.Position).Magnitude
+                local dist = (Vector2.new(targetPos.X, targetPos.Z) - Vector2.new(myRoot.Position.X, myRoot.Position.Z)).Magnitude
+                lastDist = dist
                 if dist <= stopDistance then
                     -- Stop pushing MoveTo once we're close enough.
                     pcall(function()
@@ -1015,6 +1224,23 @@ local function walkToUntilWithin(targetPos, stopDistance)
     endForceAutoJump()
     if not ok then
         warn("[DROP] WalkTo loop error:", err)
+    end
+
+    -- If we got interrupted (token changed) between Heartbeat ticks, we may have arrived but never hit the <= check.
+    if not reached then
+        local myChar = LocalPlayer.Character
+        local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+        if myRoot then
+            local finalDist = (Vector2.new(targetPos.X, targetPos.Z) - Vector2.new(myRoot.Position.X, myRoot.Position.Z)).Magnitude
+            lastDist = math.min(lastDist, finalDist)
+            if finalDist <= (stopDistance + STOP_TOLERANCE) then
+                reached = true
+            end
+        end
+    end
+
+    if (not reached) and (lastDist < math.huge) then
+        warn(string.format("[DROP] Did not reach drop point (dist=%.2f, stop=%.2f).", lastDist, stopDistance))
     end
 
     return ok and reached
@@ -1068,13 +1294,88 @@ local function showInventoryManager()
     
     local refreshBtn = Instance.new("TextButton", header)
     refreshBtn.Size = UDim2.new(0, 80, 0, 30)
-    refreshBtn.Position = UDim2.new(1, -140, 0, 10)
+    refreshBtn.Position = UDim2.new(1, -90, 0, 10)
     refreshBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
     refreshBtn.Text = "REFRESH"
     refreshBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
     refreshBtn.TextSize = 12
     refreshBtn.Font = Enum.Font.GothamBold
     Instance.new("UICorner", refreshBtn).CornerRadius = UDim.new(0, 6)
+
+    local globalDropBtn = Instance.new("TextButton", header)
+    globalDropBtn.Size = UDim2.new(0, 80, 0, 30)
+    globalDropBtn.Position = UDim2.new(1, -180, 0, 10)
+    globalDropBtn.BackgroundColor3 = Color3.fromRGB(150, 100, 60)
+    globalDropBtn.Text = "DROP"
+    globalDropBtn.TextColor3 = Color3.fromRGB(255, 230, 200)
+    globalDropBtn.TextSize = 12
+    globalDropBtn.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", globalDropBtn).CornerRadius = UDim.new(0, 6)
+
+    -- View 3: Global Drop Menu (Popup)
+    local dropMenu = Instance.new("Frame", mainFrame)
+    dropMenu.Size = UDim2.new(0, 300, 0, 220)
+    dropMenu.Position = UDim2.new(0.5, -150, 0.5, -110)
+    dropMenu.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+    dropMenu.BorderSizePixel = 0
+    dropMenu.Visible = false
+    dropMenu.ZIndex = 10
+    local menuCorner = Instance.new("UICorner", dropMenu)
+    menuCorner.CornerRadius = UDim.new(0, 10)
+    local menuStroke = Instance.new("UIStroke", dropMenu)
+    menuStroke.Color = Color3.fromRGB(100, 100, 110)
+    menuStroke.Thickness = 2
+
+    local menuTitle = Instance.new("TextLabel", dropMenu)
+    menuTitle.Size = UDim2.new(1, 0, 0, 40)
+    menuTitle.Text = "GLOBAL DROP ORDER"
+    menuTitle.TextColor3 = Color3.fromRGB(255, 200, 100)
+    menuTitle.Font = Enum.Font.GothamBold
+    menuTitle.TextSize = 14
+    menuTitle.BackgroundTransparency = 1
+    menuTitle.ZIndex = 11
+
+    local gItemInput = Instance.new("TextBox", dropMenu)
+    gItemInput.Size = UDim2.new(1, -40, 0, 35)
+    gItemInput.Position = UDim2.new(0, 20, 0, 50)
+    gItemInput.BackgroundColor3 = Color3.fromRGB(45, 45, 50)
+    gItemInput.PlaceholderText = "Item Name"
+    gItemInput.Text = ""
+    gItemInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+    gItemInput.Font = Enum.Font.Gotham
+    gItemInput.ZIndex = 11
+    Instance.new("UICorner", gItemInput)
+
+    local gQtyInput = Instance.new("TextBox", dropMenu)
+    gQtyInput.Size = UDim2.new(1, -40, 0, 35)
+    gQtyInput.Position = UDim2.new(0, 20, 0, 95)
+    gQtyInput.BackgroundColor3 = Color3.fromRGB(45, 45, 50)
+    gQtyInput.PlaceholderText = "Amount"
+    gQtyInput.Text = "1"
+    gQtyInput.TextColor3 = Color3.fromRGB(100, 255, 100)
+    gQtyInput.Font = Enum.Font.GothamBold
+    gQtyInput.ZIndex = 11
+    Instance.new("UICorner", gQtyInput)
+
+    local gConfirmBtn = Instance.new("TextButton", dropMenu)
+    gConfirmBtn.Size = UDim2.new(1, -40, 0, 40)
+    gConfirmBtn.Position = UDim2.new(0, 20, 0, 145)
+    gConfirmBtn.BackgroundColor3 = Color3.fromRGB(100, 180, 100)
+    gConfirmBtn.Text = "CONFIRM & PICK LOCATION"
+    gConfirmBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    gConfirmBtn.Font = Enum.Font.GothamBold
+    gConfirmBtn.ZIndex = 11
+    Instance.new("UICorner", gConfirmBtn)
+
+    local gCancelBtn = Instance.new("TextButton", dropMenu)
+    gCancelBtn.Size = UDim2.new(1, 0, 0, 20)
+    gCancelBtn.Position = UDim2.new(0, 0, 1, -25)
+    gCancelBtn.Text = "CANCEL"
+    gCancelBtn.TextColor3 = Color3.fromRGB(200, 80, 80)
+    gCancelBtn.Font = Enum.Font.Gotham
+    gCancelBtn.TextSize = 10
+    gCancelBtn.BackgroundTransparency = 1
+    gCancelBtn.ZIndex = 11
     
     -- Main Container
     local container = Instance.new("Frame", mainFrame)
@@ -1324,33 +1625,43 @@ local function showInventoryManager()
         local name = dropName.Text
         local qty = dropQty.Text
         if name == "" then
+            sendNotify("Error", "Please enter an item name")
             return
         end
 
         sendNotify("Drop", "Click where the soldier should walk to drop")
+
+        -- Clear any previous pending click mode first.
+        cancelPendingClick()
+
+        -- DESTROY the Inventory Manager immediately so it doesn't block the screen
+        -- and the click doesn't accidentally trigger other UI elements.
+        screenGui:Destroy()
+
         setPendingClick(Mouse.Button1Down:Connect(function()
             if not Mouse.Hit then return end
+            cancelPendingClick() -- Stop selecting after one click
+
             local targetPos = Mouse.Hit.Position
             local coordsStr = string.format("%.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
 
             -- If no client is selected (or you selected yourself), do it locally for instant response.
             if (not selectedClientId) or (selectedClientId == clientId) then
                 task.spawn(function()
-                    local reached = walkToUntilWithin(targetPos, 3)
+                    sendNotify("Walking", "Local: Moving to drop location...")
+                    local reached = walkToUntilWithin(targetPos, 6)
                     if reached then
                         dropItemByName(name, qty)
                     else
-                        sendNotify("Drop", "Cancelled before reaching drop point")
+                        sendNotify("Drop", "Movement cancelled/interrupted")
                     end
                 end)
-                sendNotify("Inventory", "Walking to drop point (local)")
             else
                 -- New command: target_drop_at <clientId> <x,y,z> <name...> <qty>
                 sendCommand("target_drop_at " .. selectedClientId .. " " .. coordsStr .. " " .. name .. " " .. qty)
-                sendNotify("Inventory", "Drop point sent to soldier")
+                sendNotify("Inventory", "Order sent to " .. selectedClientId)
             end
-            cancelPendingClick()
-        end), nil)
+        end))
     end)
     
     deselectBtn.MouseButton1Click:Connect(function()
@@ -1359,6 +1670,39 @@ local function showInventoryManager()
     end)
     
     refreshBtn.MouseButton1Click:Connect(fetchAll)
+
+    globalDropBtn.MouseButton1Click:Connect(function()
+        dropMenu.Visible = true
+    end)
+
+    gCancelBtn.MouseButton1Click:Connect(function()
+        dropMenu.Visible = false
+    end)
+
+    gConfirmBtn.MouseButton1Click:Connect(function()
+        local name = gItemInput.Text
+        local qty = gQtyInput.Text
+        if name == "" then
+            sendNotify("Error", "Please enter an item name")
+            return
+        end
+
+        sendNotify("Global Drop", "Click where ALL soldiers should walk to drop " .. name)
+        cancelPendingClick()
+        screenGui:Destroy()
+
+        setPendingClick(Mouse.Button1Down:Connect(function()
+            if not Mouse.Hit then return end
+            cancelPendingClick()
+
+            local targetPos = Mouse.Hit.Position
+            local coordsStr = string.format("%.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
+            local qtyValue = (qty ~= "" and qty) or "1"
+
+            sendCommand("target_drop_at all " .. coordsStr .. " " .. name .. " " .. qtyValue)
+            sendNotify("Global Inventory", "Order sent to ALL soldiers (" .. qtyValue .. "x " .. name .. ")")
+        end))
+    end)
     
     -- Initial Load
     fetchAll()
@@ -1380,7 +1724,7 @@ local function performToolbarScan(targetName)
 
     for slot = 1, 6 do
         fireEquip(slot)
-        task.wait(0.6) -- Wait for server/UI update
+        task.wait(0.6) -- Original speed for stability
         
         local currentText = toolbarTitle.Text:lower()
         if currentText:find(targetName, 1, true) then
@@ -1393,18 +1737,20 @@ end
 
 local function scanAndEquip(toolName)
     if not toolName or toolName == "" then return end
-    print("[SCAN] Attempting to find tool in Toolbar: " .. toolName)
+    print("[SCAN] Starting sync for tool: " .. toolName)
     
     local targetName = toolName:lower()
     
-    -- Phase 1: Scan Toolbar (Slots 1-6)
-    local foundSlot = performToolbarScan(targetName)
-    if foundSlot then
-        return true
-    end
-    
-    -- Phase 2: Search Inventory Fallback
-    print("[SCAN] Not in toolbar. Searching Inventory for: " .. toolName)
+    -- Clear current title at start of flow for fresh verification
+    local toolbarContainer = LocalPlayer.PlayerGui:FindFirstChild("MainGui", true)
+        and LocalPlayer.PlayerGui.MainGui:FindFirstChild("Panels", true)
+        and LocalPlayer.PlayerGui.MainGui.Panels:FindFirstChild("Toolbar", true)
+        and LocalPlayer.PlayerGui.MainGui.Panels.Toolbar:FindFirstChild("Container", true)
+    local toolbarTitle = toolbarContainer and toolbarContainer:FindFirstChild("Title", true)
+    if toolbarTitle then toolbarTitle.Text = "" end
+
+    -- Phase 1: Search Inventory FIRST
+    print("[SCAN] Phase 1: Searching Inventory for: " .. toolName)
     local inventoryList = LocalPlayer.PlayerGui:FindFirstChild("MainGui", true)
         and LocalPlayer.PlayerGui.MainGui:FindFirstChild("RightPanel", true)
         and LocalPlayer.PlayerGui.MainGui.RightPanel:FindFirstChild("Inventory", true)
@@ -1417,9 +1763,9 @@ local function scanAndEquip(toolName)
                 print("[SCAN] Found in Inventory! Order: " .. order .. ". Firing UseBagItem Remote (43)")
                 fireInventoryUse(order)
                 
-                -- Wait 3 seconds and verify it's now in the toolbar
-                print("[SCAN] Waiting 3s for inventory -> toolbar move...")
-                task.wait(3)
+                -- Wait 2 seconds and verify it's now in the toolbar
+                print("[SCAN] Waiting 2s for inventory -> toolbar move...")
+                task.wait(2)
                 print("[SCAN] Verifying toolbar placement...")
                 local verifiedSlot = performToolbarScan(targetName)
                 if verifiedSlot then
@@ -1428,11 +1774,16 @@ local function scanAndEquip(toolName)
                 else
                     print("[SCAN] Verification failed: Tool not found in toolbar after use")
                 end
-                return true -- Still return true as we fired the remote, but verification is logged
+                -- Fallthrough to toolbar scan if inventory use didn't result in equip
             end
         end
-    else
-        warn("[SCAN] Inventory List UI not found")
+    end
+
+    -- Phase 2: Scan Toolbar (Slots 1-6)
+    print("[SCAN] Phase 2: Scanning Toolbar slots...")
+    local foundSlot = performToolbarScan(targetName)
+    if foundSlot then
+        return true
     end
     
     print("[SCAN] Failed to find " .. toolName .. " anywhere")
@@ -1538,6 +1889,166 @@ local function terminateScript()
     isCommander = false
 end
 
+
+local function showPickupManager()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return end
+    
+    if pg:FindFirstChild("ArmyPickupManager") then
+        pg.ArmyPickupManager:Destroy()
+    end
+    
+    local screenGui = Instance.new("ScreenGui", pg)
+    screenGui.Name = "ArmyPickupManager"
+    screenGui.ResetOnSpawn = false
+    
+    local panel = Instance.new("Frame", screenGui)
+    panel.Size = UDim2.new(0, 300, 0, 400)
+    panel.Position = UDim2.new(0.5, -150, 0.5, -200)
+    panel.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+    panel.BorderSizePixel = 0
+    Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 10)
+    Instance.new("UIStroke", panel).Color = Color3.fromRGB(60, 60, 70)
+    
+    local header = Instance.new("Frame", panel)
+    header.Size = UDim2.new(1, 0, 0, 50)
+    header.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+    header.BorderSizePixel = 0
+    Instance.new("UICorner", header)
+    
+    local title = Instance.new("TextLabel", header)
+    title.Size = UDim2.new(1, -60, 1, 0)
+    title.Position = UDim2.new(0, 15, 0, 0)
+    title.BackgroundTransparency = 1
+    title.Text = "PICKUP MANAGER"
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.TextSize = 16
+    title.Font = Enum.Font.GothamBold
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    
+    local close = Instance.new("TextButton", header)
+    close.Size = UDim2.new(0, 30, 0, 30)
+    close.Position = UDim2.new(1, -40, 0, 10)
+    close.BackgroundTransparency = 1
+    close.Text = "✕"
+    close.TextColor3 = Color3.fromRGB(200, 200, 200)
+    close.TextSize = 18
+    close.Font = Enum.Font.GothamBold
+    close.MouseButton1Click:Connect(function() screenGui:Destroy() end)
+    
+    local content = Instance.new("ScrollingFrame", panel)
+    content.Size = UDim2.new(1, -20, 1, -110)
+    content.Position = UDim2.new(0, 10, 0, 60)
+    content.BackgroundTransparency = 1
+    content.BorderSizePixel = 0
+    content.ScrollBarThickness = 4
+    content.CanvasSize = UDim2.new(0, 0, 0, 0)
+    content.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    
+    local list = Instance.new("UIListLayout", content)
+    list.Padding = UDim.new(0, 5)
+    
+    local toggleBtn = Instance.new("TextButton", panel)
+    toggleBtn.Size = UDim2.new(1, -20, 0, 40)
+    toggleBtn.Position = UDim2.new(0, 10, 1, -95)
+    toggleBtn.BackgroundColor3 = serverConfigs.auto_pickup and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(150, 50, 50)
+    toggleBtn.Text = "AUTO PICKUP: " .. (serverConfigs.auto_pickup and "ON" or "OFF")
+    toggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    toggleBtn.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", toggleBtn)
+    
+    toggleBtn.MouseButton1Click:Connect(function()
+        local newState = not serverConfigs.auto_pickup
+        if updateServerConfig({ auto_pickup = newState }) then
+            toggleBtn.BackgroundColor3 = newState and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(150, 50, 50)
+            toggleBtn.Text = "AUTO PICKUP: " .. (newState and "ON" or "OFF")
+        end
+    end)
+    
+    local inputFrame = Instance.new("Frame", panel)
+    inputFrame.Size = UDim2.new(1, -20, 0, 35)
+    inputFrame.Position = UDim2.new(0, 10, 1, -45)
+    inputFrame.BackgroundTransparency = 1
+    
+    local input = Instance.new("TextBox", inputFrame)
+    input.Size = UDim2.new(1, -45, 1, 0)
+    input.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
+    input.BorderSizePixel = 0
+    input.Text = ""
+    input.PlaceholderText = "Add item to whitelist..."
+    input.TextColor3 = Color3.fromRGB(255, 255, 255)
+    input.TextSize = 13
+    input.Font = Enum.Font.Gotham
+    Instance.new("UICorner", input)
+    
+    local add = Instance.new("TextButton", inputFrame)
+    add.Size = UDim2.new(0, 35, 1, 0)
+    add.Position = UDim2.new(1, -35, 0, 0)
+    add.BackgroundColor3 = Color3.fromRGB(100, 200, 255)
+    add.Text = "+"
+    add.TextColor3 = Color3.fromRGB(255, 255, 255)
+    add.TextSize = 20
+    add.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", add)
+    
+    local function refreshWhitelist()
+        for _, child in ipairs(content:GetChildren()) do
+            if child:IsA("Frame") then child:Destroy() end
+        end
+        
+        for i, name in ipairs(serverConfigs.pickup_whitelist) do
+            local item = Instance.new("Frame", content)
+            item.Size = UDim2.new(1, 0, 0, 30)
+            item.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
+            item.BorderSizePixel = 0
+            Instance.new("UICorner", item)
+            
+            local label = Instance.new("TextLabel", item)
+            label.Size = UDim2.new(1, -40, 1, 0)
+            label.Position = UDim2.new(0, 10, 0, 0)
+            label.BackgroundTransparency = 1
+            label.Text = name
+            label.TextColor3 = Color3.fromRGB(220, 220, 220)
+            label.TextSize = 12
+            label.Font = Enum.Font.Gotham
+            label.TextXAlignment = Enum.TextXAlignment.Left
+            
+            local rm = Instance.new("TextButton", item)
+            rm.Size = UDim2.new(0, 24, 0, 24)
+            rm.Position = UDim2.new(1, -27, 0, 3)
+            rm.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+            rm.Text = "-"
+            rm.TextColor3 = Color3.fromRGB(255, 255, 255)
+            rm.TextSize = 16
+            rm.Font = Enum.Font.GothamBold
+            Instance.new("UICorner", rm)
+            
+            rm.MouseButton1Click:Connect(function()
+                local newList = {}
+                for idx, val in ipairs(serverConfigs.pickup_whitelist) do
+                    if idx ~= i then table.insert(newList, val) end
+                end
+                if updateServerConfig({ pickup_whitelist = newList }) then
+                    refreshWhitelist()
+                end
+            end)
+        end
+    end
+    
+    add.MouseButton1Click:Connect(function()
+        if input.Text ~= "" then
+            local newList = {}
+            for _, v in ipairs(serverConfigs.pickup_whitelist) do table.insert(newList, v) end
+            table.insert(newList, input.Text)
+            if updateServerConfig({ pickup_whitelist = newList }) then
+                input.Text = ""
+                refreshWhitelist()
+            end
+        end
+    end)
+    
+    refreshWhitelist()
+end
 
 -- Create Modern Sidebar Panel
 local function createPanel()
@@ -2585,17 +3096,17 @@ local function createPanel()
                     end
                 },
                 {
-                    Text = "Equip Tool",
-                    Color = Color3.fromRGB(100, 200, 255),
-                    Callback = function()
-                        showToolSearchDialog()
-                    end
-                },
-                {
                     Text = "Inventory Manager",
                     Color = Color3.fromRGB(200, 100, 255),
                     Callback = function()
                         showInventoryManager()
+                    end
+                },
+                {
+                    Text = "Equip Tool",
+                    Color = Color3.fromRGB(100, 200, 255),
+                    Callback = function()
+                        showToolSearchDialog()
                     end
                 },
                 {
@@ -2604,6 +3115,13 @@ local function createPanel()
                     Callback = function()
                         sendCommand("unequip_all")
                         sendNotify("Equip", "Army clearing toolbar to inventory")
+                    end
+                },
+                {
+                    Text = "Pickup",
+                    Color = Color3.fromRGB(100, 255, 150),
+                    Callback = function()
+                        showPickupManager()
                     end
                 }
             }
@@ -2765,12 +3283,13 @@ while isRunning do
 
                         -- Even if we don't execute on commander, still show what came back from the server
                         -- so you can verify the command actually made it through.
-                        if isCommander and observeServerCommands and (action ~= "wait") then
-                            sendNotify("Order Received", action)
-                        end
+                        -- Silence automated order notifications on commander per request
+                        -- if isCommander and observeServerCommands and (action ~= "wait") then
+                        --     sendNotify("Order Received", action)
+                        -- end
 
                         if shouldExecute then
-                            sendNotify("New Order", action)
+                            if not isCommander then sendNotify("New Order", action) end
 
                             local execResult, execError = pcall(function()
                                 -- If a tp-walk goto loop is running, it will continuously TranslateBy and can
@@ -2796,7 +3315,8 @@ while isRunning do
                                 elseif string.sub(action, 1, 15) == "target_drop_at " then
                                     -- Format: target_drop_at <clientId> <x,y,z> <name...> <qty>
                                     local parts = string.split(action, " ")
-                                    if parts[2] == clientId then
+                                    local targetId = parts[2]
+                                    if targetId == clientId or targetId == "all" then
                                         local coordsStr = parts[3]
                                         local qty = parts[#parts]
                                         local name = table.concat(parts, " ", 4, math.max(4, #parts - 1))
@@ -2805,10 +3325,12 @@ while isRunning do
                                         if #coords == 3 then
                                             local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
                                             -- Walk until we're close, then start dropping.
-                                            local reached = walkToUntilWithin(targetPos, 3)
+                                            sendNotify("Inventory", "Moving to remote drop point...")
+                                            local reached = walkToUntilWithin(targetPos, 6)
                                             if reached then
                                                 dropItemByName(name, qty)
                                             else
+                                                sendNotify("Error", "Drop cancelled (obstructed/timed out)")
                                                 warn("[DROP] Cancelled/aborted before reaching drop point; not dropping.")
                                             end
                                         end
@@ -2875,6 +3397,8 @@ while isRunning do
                                 elseif string.sub(action, 1, 15) == "set_autojump " then
                                     local enabledStr = string.sub(action, 16)
                                     autoJumpEnabled = (enabledStr == "true")
+                                elseif action == "refresh_configs" then
+                                    fetchServerConfigs()
                                 elseif action == "reload" then
                                     terminateScript()
                                     loadstring(game:HttpGet(RELOAD_URL .. "?t=" .. os.time()))()
@@ -2926,7 +3450,7 @@ while isRunning do
                                 elseif action == "unequip_all" then
                                     for slot = 1, 6 do
                                         fireInventoryStore(slot)
-                                        task.wait(0.2)
+                                        task.wait(0.05)
                                     end
                                     print("[UNEQUIP] All slots cleared to inventory")
                                 elseif string.sub(action, 1, 11) == "sync_equip " then

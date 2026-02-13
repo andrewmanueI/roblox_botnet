@@ -16,6 +16,12 @@ const commandHistory = new Map(); // commandId -> { id, action, time, type, exec
 const MAX_HISTORY = 100;
 let impulseTimer = null;
 const clientInventories = new Map(); // clientId -> { data, timestamp }
+// Server-wide configurations
+let serverConfigs = {
+    auto_pickup: false,
+    pickup_whitelist: [] // List of item names (strings)
+};
+
 // Formation state
 let formationState = {
     active: false,
@@ -242,6 +248,13 @@ const server = http.createServer((req, res) => {
             };
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(status, null, 2));
+            return;
+        }
+
+        // Server config endpoint
+        if (req.url === '/config') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(serverConfigs));
             return;
         }
 
@@ -517,6 +530,31 @@ const server = http.createServer((req, res) => {
                 
                 res.writeHead(200);
                 res.end("Order Updated");
+            });
+            return;
+        }
+
+        // Server config update endpoint
+        if (req.url === '/config') {
+            let body = '';
+            req.on('data', chunk => { body += chunk.toString(); });
+            req.on('end', () => {
+                try {
+                    const newConfig = JSON.parse(body);
+                    if (newConfig.auto_pickup !== undefined) {
+                        serverConfigs.auto_pickup = !!newConfig.auto_pickup;
+                    }
+                    if (newConfig.pickup_whitelist !== undefined && Array.isArray(newConfig.pickup_whitelist)) {
+                        serverConfigs.pickup_whitelist = newConfig.pickup_whitelist;
+                    }
+                    console.log(`[CONFIG] Updated: auto_pickup=${serverConfigs.auto_pickup}, whitelist=[${serverConfigs.pickup_whitelist.join(', ')}]`);
+                    updateCommand("refresh_configs", "CONFIG_UPDATE");
+                    res.writeHead(200);
+                    res.end('Config Updated');
+                } catch (e) {
+                    res.writeHead(400);
+                    res.end('Invalid config data');
+                }
             });
             return;
         }
