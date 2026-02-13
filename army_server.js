@@ -141,13 +141,13 @@ const updateCommand = (action, source) => {
 const cleanupClients = () => {
     const now = Date.now();
     for (const [id, client] of clients.entries()) {
-        if (now - client.lastSeen > 60000) { // 60 seconds timeout
+        if (now - client.lastSeen > 10000) { // 10 seconds timeout
             console.log(`[CLIENT] Time-out: ${id}`);
             clients.delete(id);
         }
     }
 };
-setInterval(cleanupClients, 10000);
+setInterval(cleanupClients, 5000); // Check every 5 seconds
 
 console.log("ARMY HTTP SERVER RUNNING (POLLING MODE)");
 console.log("Listening on Port: 5555");
@@ -391,8 +391,9 @@ const server = http.createServer((req, res) => {
                         assignFormationPositions();
                         
                         console.log(`[FORMATION] Follow mode: ${formationState.shape} around user ${formationState.leaderId}`);
+                        console.log(`[FORMATION] Assigned positions for ${formationState.assignments.size} clients`);
                         
-                        // Broadcast formation to all clients
+                        // Broadcast formation to all clients with their assigned indices
                         if (!updateCommand(newAction, "HTTP")) {
                             res.writeHead(400);
                             res.end("Missing command");
@@ -400,9 +401,10 @@ const server = http.createServer((req, res) => {
                         }
                     }
                 } else if (newAction.startsWith('formation_goto ')) {
-                    // Format: formation_goto <x,y,z> <shape>
+                    // Format: formation_goto <x,y,z> <shape> <positions_json>
+                    // Positions are now calculated by commander and sent to server
                     const parts = newAction.split(' ');
-                    if (parts.length >= 3) {
+                    if (parts.length >= 4) {
                         const coords = parts[1].split(',');
                         if (coords.length === 3) {
                             formationState.active = true;
@@ -414,11 +416,14 @@ const server = http.createServer((req, res) => {
                                 z: parseFloat(coords[2])
                             };
                             formationState.leaderId = null;
-                            assignFormationPositions();
+                            
+                            // Positions are already calculated by commander
+                            const positionsJson = parts[3];
                             
                             console.log(`[FORMATION] Goto mode: ${formationState.shape} at (${formationState.center.x}, ${formationState.center.y}, ${formationState.center.z})`);
+                            console.log(`[FORMATION] Using commander-calculated positions`);
                             
-                            // Broadcast formation to all clients
+                            // Broadcast formation to all clients with positions from commander
                             if (!updateCommand(newAction, "HTTP")) {
                                 res.writeHead(400);
                                 res.end("Missing command");
@@ -470,7 +475,7 @@ server.listen(5555, '0.0.0.0');
 // Client cleanup routine - remove inactive clients
 setInterval(() => {
     const now = Date.now();
-    const TIMEOUT_MS = 60000; // 1 minute timeout
+    const TIMEOUT_MS = 10000; // 10 seconds timeout
     let removedCount = 0;
 
     for (const [clientId, client] of clients.entries()) {
@@ -484,13 +489,13 @@ setInterval(() => {
     if (removedCount > 0) {
         console.log(`[CLEANUP] Removed ${removedCount} inactive clients. Active: ${clients.size}`);
     }
-}, 30000); // Check every 30 seconds
+}, 5000); // Check every 5 seconds
 
 // Admin console monitoring
 setInterval(() => {
     const now = Date.now();
     const activeClients = Array.from(clients.values()).filter(
-        c => now - c.lastSeen < 60000
+        c => now - c.lastSeen < 10000
     ).length;
 
     if (latestCommand.id > 0) {

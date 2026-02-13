@@ -13,7 +13,7 @@ local Mouse = LocalPlayer:GetMouse()
 
 local SERVER_URL = "http://157.15.40.37:5555"
 local RELOAD_URL = "https://raw.githubusercontent.com/andrewmanueI/roblox_botnet/master/army_soldier.lua"
-local POLL_RATE = 0.5
+local POLL_RATE = 0.3
 local lastCommandId = 0
 local isRunning = true
 local isCommander = false
@@ -21,7 +21,7 @@ local connections = {}
 local clientId = nil
 local executedCommands = {} -- Map of commandId -> executed (boolean)
 local lastHeartbeat = 0
-local HEARTBEAT_INTERVAL = 15 -- seconds
+local HEARTBEAT_INTERVAL = 5 -- seconds
 local lastETag = nil
 local MIN_POLL_RATE = 0.2
 local MAX_POLL_RATE = 2.0
@@ -469,29 +469,60 @@ stopFollowingPosition = function()
     -- Removed
 end
 
-local function createHolographicCubes(position)
+local function createHolographicCubes(position, shape, clientCount)
     -- Clear existing cubes
     for _, cube in ipairs(formationHoloCubes) do
         if cube then cube:Destroy() end
     end
     formationHoloCubes = {}
     
-    -- Create holographic cube (2 wide, 3 tall)
-    local cubeSize = Vector3.new(2, 3, 2)
-    local cube = Instance.new("Part")
-    cube.Size = cubeSize
-    cube.Position = position
-    cube.Anchored = true
-    cube.CanCollide = false
-    cube.CanQuery = false -- Ignore raycasts so Mouse.Hit doesn't detect it
-    cube.Transparency = 0.7
-    cube.Color = Color3.fromRGB(0, 255, 255) -- Cyan
-    cube.Material = Enum.Material.Neon
-    cube.Parent = workspace
+    -- Calculate positions for each client based on shape
+    local positions = {}
     
-    table.insert(formationHoloCubes, cube)
+    if shape == "Line" then
+        -- Horizontal line
+        for i = 0, clientCount - 1 do
+            local offset = (i - math.floor(clientCount / 2)) * 4
+            table.insert(positions, position + Vector3.new(offset, 3, 0))
+        end
+    elseif shape == "Row" then
+        -- Rows of 3
+        local rowSize = 3
+        for i = 0, clientCount - 1 do
+            local row = math.floor(i / rowSize)
+            local col = i % rowSize
+            table.insert(positions, position + Vector3.new((col - 1) * 4, 3, row * 4))
+        end
+    elseif shape == "Circle" then
+        -- Circle formation
+        local radius = 15
+        for i = 0, clientCount - 1 do
+            local angle = (i / clientCount) * math.pi * 2
+            table.insert(positions, position + Vector3.new(
+                math.cos(angle) * radius,
+                3,
+                math.sin(angle) * radius
+            ))
+        end
+    end
     
-    return cube
+    -- Create a cube for each position
+    for _, pos in ipairs(positions) do
+        local cube = Instance.new("Part")
+        cube.Size = Vector3.new(2, 3, 2)
+        cube.Position = pos
+        cube.Anchored = true
+        cube.CanCollide = false
+        cube.CanQuery = false -- Ignore raycasts so Mouse.Hit doesn't detect it
+        cube.Transparency = 0.7
+        cube.Color = Color3.fromRGB(0, 255, 255) -- Cyan
+        cube.Material = Enum.Material.Neon
+        cube.Parent = workspace
+        
+        table.insert(formationHoloCubes, cube)
+    end
+    
+    return formationHoloCubes
 end
 
 local function clearHolographicCubes()
@@ -501,12 +532,9 @@ local function clearHolographicCubes()
     formationHoloCubes = {}
 end
 
-local function updateHolographicCube(position)
-    if #formationHoloCubes > 0 and formationHoloCubes[1] then
-        formationHoloCubes[1].Position = position
-    else
-        createHolographicCubes(position)
-    end
+local function updateHolographicCubes(position, shape, clientCount)
+    -- Just recreate all cubes at new position
+    createHolographicCubes(position, shape, clientCount)
 end
 
 
@@ -1083,19 +1111,6 @@ local function createPanel()
         Color = Color3.fromRGB(255, 150, 255),
         Buttons = {
             {
-                Text = "Mode: " .. formationMode,
-                Color = Color3.fromRGB(150, 100, 255),
-                Callback = function(btn)
-                    if formationMode == "Follow" then
-                        formationMode = "Goto"
-                    else
-                        formationMode = "Follow"
-                    end
-                    btn.Text = "Mode: " .. formationMode
-                    sendNotify("Formation", "Mode: " .. formationMode)
-                end
-            },
-            {
                 Text = "Shape: " .. formationShape,
                 Color = Color3.fromRGB(100, 200, 255),
                 Callback = function(btn)
@@ -1114,7 +1129,8 @@ local function createPanel()
                 Text = "Follow Formation",
                 Color = Color3.fromRGB(100, 255, 150),
                 Callback = function()
-                    if formationMode == "Follow" then
+                    formationMode = "Follow" -- Auto-switch to Follow mode
+                    if true then
                         sendNotify("Follow Formation", "Click on a player to form around")
                         local highlights = highlightPlayers()
                         
@@ -1135,51 +1151,125 @@ local function createPanel()
                         end), function()
                             clearHighlights(highlights)
                         end)
-                    else
-                        sendNotify("Formation", "Switch to Follow mode first")
-                    end
                 end
             },
             {
                 Text = "Goto Formation",
                 Color = Color3.fromRGB(255, 200, 100),
                 Callback = function()
-                    if formationMode == "Goto" then
-                        sendNotify("Goto Formation", "Click where to place formation")
+                    formationMode = "Goto" -- Auto-switch to Goto mode
+                    if true then
+                        sendNotify("Goto Formation", "Fetching client count...")
                         
-                        -- Show holographic cube at mouse position
-                        local mouseMoveConn
-                        mouseMoveConn = RunService.RenderStepped:Connect(function()
-                            if Mouse.Hit then
-                                local targetPos = Mouse.Hit.Position + Vector3.new(0, 1.5, 0)
-                                updateHolographicCube(targetPos)
+                        -- Fetch client count from server
+                        task.spawn(function()
+                            local request = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
+                            if not request then
+                                sendNotify("Error", "HTTP request not available")
+                                return
                             end
-                        end)
-                        
-                        setPendingClick(Mouse.Button1Down:Connect(function()
-                            if Mouse.Hit then
-                                local targetPos = Mouse.Hit.Position + Vector3.new(0, 1.5, 0)
-                                local formationCmd = string.format("formation_goto %.2f,%.2f,%.2f %s", 
-                                    targetPos.X, targetPos.Y, targetPos.Z, formationShape)
-                                sendCommand(formationCmd)
-                                sendNotify("Formation", "Goto " .. formationShape .. " formation placed")
+                            
+                            local success, response = pcall(function()
+                                return request({
+                                    Url = SERVER_URL .. "/clients",
+                                    Method = "GET"
+                                })
+                            end)
+                            
+                            local clientCount = 1 -- Default
+                            local clientIds = {}
+                            if success and response and response.Body then
+                                local jsonSuccess, data = pcall(function()
+                                    return HttpService:JSONDecode(response.Body)
+                                end)
                                 
+                                if jsonSuccess and data then
+                                    clientCount = #data
+                                    -- Extract client IDs
+                                    for _, client in ipairs(data) do
+                                        table.insert(clientIds, client.id)
+                                    end
+                                    sendNotify("Formation", "Showing formation for " .. clientCount .. " clients")
+                                end
+                            end
+                            
+                            -- Show holographic formation preview at mouse position
+                            local mouseMoveConn
+                            mouseMoveConn = RunService.RenderStepped:Connect(function()
+                                if Mouse.Hit then
+                                    local targetPos = Mouse.Hit.Position
+                                    updateHolographicCubes(targetPos, formationShape, clientCount)
+                                end
+                            end)
+                            
+                            setPendingClick(Mouse.Button1Down:Connect(function()
+                                if Mouse.Hit then
+                                    local targetPos = Mouse.Hit.Position + Vector3.new(0, 3, 0)
+                                    
+                                    -- Calculate all positions on commander side
+                                    local positions = {}
+                                    
+                                    if formationShape == "Line" then
+                                        for i = 0, clientCount - 1 do
+                                            local offset = (i - math.floor(clientCount / 2)) * 4
+                                            table.insert(positions, {
+                                                x = targetPos.X + offset,
+                                                y = targetPos.Y,
+                                                z = targetPos.Z
+                                            })
+                                        end
+                                    elseif formationShape == "Row" then
+                                        local rowSize = 3
+                                        for i = 0, clientCount - 1 do
+                                            local row = math.floor(i / rowSize)
+                                            local col = i % rowSize
+                                            table.insert(positions, {
+                                                x = targetPos.X + (col - 1) * 4,
+                                                y = targetPos.Y,
+                                                z = targetPos.Z + row * 4
+                                            })
+                                        end
+                                    elseif formationShape == "Circle" then
+                                        local radius = 15
+                                        for i = 0, clientCount - 1 do
+                                            local angle = (i / clientCount) * math.pi * 2
+                                            table.insert(positions, {
+                                                x = targetPos.X + math.cos(angle) * radius,
+                                                y = targetPos.Y,
+                                                z = targetPos.Z + math.sin(angle) * radius
+                                            })
+                                        end
+                                    end
+                                    
+                                    -- Create position mapping for each client
+                                    local positionsData = {}
+                                    for i, clientId in ipairs(clientIds) do
+                                        if positions[i] then
+                                            positionsData[clientId] = positions[i]
+                                        end
+                                    end
+                                    
+                                    -- Send formation command with pre-calculated positions
+                                    local positionsJson = HttpService:JSONEncode(positionsData)
+                                    local formationCmd = string.format("formation_goto %.2f,%.2f,%.2f %s %s", 
+                                        targetPos.X, targetPos.Y, targetPos.Z, formationShape, positionsJson)
+                                    sendCommand(formationCmd)
+                                    sendNotify("Formation", "Goto " .. formationShape .. " formation placed")
+                                    
+                                    if mouseMoveConn then
+                                        mouseMoveConn:Disconnect()
+                                    end
+                                    clearHolographicCubes()
+                                    cancelPendingClick()
+                                end
+                            end), function()
+                                -- Cleanup: disconnect mouse move and clear cubes
                                 if mouseMoveConn then
                                     mouseMoveConn:Disconnect()
                                 end
                                 clearHolographicCubes()
-                                cancelPendingClick()
-                            end
-                        end), function()
-                            -- Cleanup: disconnect mouse move and clear cubes
-                            if mouseMoveConn then
-                                mouseMoveConn:Disconnect()
-                            end
-                            clearHolographicCubes()
+                            end)
                         end)
-                    else
-                        sendNotify("Formation", "Switch to Goto mode first")
-                    end
                 end
             },
             {
@@ -1428,9 +1518,10 @@ while isRunning do
                                         sendNotify("Formation", "Following in " .. formationShape)
                                     end
                                 elseif string.sub(action, 1, 15) == "formation_goto " then
-                                    -- Format: formation_goto <x,y,z> <shape>
+                                    -- Format: formation_goto <x,y,z> <shape> <positions_json>
+                                    -- Positions calculated by commander
                                     local parts = string.split(string.sub(action, 16), " ")
-                                    if #parts >= 2 then
+                                    if #parts >= 4 then
                                         local coords = string.split(parts[1], ",")
                                         formationShape = parts[2]
                                         formationMode = "Goto"
@@ -1443,33 +1534,27 @@ while isRunning do
                                                 tonumber(coords[3])
                                             )
                                             
-                                            -- Calculate this client's position in formation
-                                            -- For now, use a simple offset based on client registration order
-                                            -- In a real implementation, server would assign specific indices
-                                            local myIndex = (LocalPlayer.UserId % 20) -- Simple index assignment
-                                            local targetPos = formationCenter
-                                            
-                                            if formationShape == "Line" then
-                                                targetPos = formationCenter + Vector3.new((myIndex - 10) * 4, 0, 0)
-                                            elseif formationShape == "Row" then
-                                                local row = math.floor(myIndex / 3)
-                                                local col = myIndex % 3
-                                                targetPos = formationCenter + Vector3.new((col - 1) * 4, 0, row * 4)
-                                            elseif formationShape == "Circle" then
-                                                local angle = (myIndex / 20) * math.pi * 2
-                                                local radius = 15
-                                                targetPos = formationCenter + Vector3.new(
-                                                    math.cos(angle) * radius,
-                                                    0,
-                                                    math.sin(angle) * radius
-                                                )
+                                            -- Parse positions JSON from commander (via server)
+                                            local positionsJson = parts[3]
+                                            if positionsJson then
+                                                local success, positionsData = pcall(function()
+                                                    return HttpService:JSONDecode(positionsJson)
+                                                end)
+                                                
+                                                if success and positionsData and positionsData[clientId] then
+                                                    -- Commander assigned us a specific position
+                                                    local myPos = positionsData[clientId]
+                                                    local targetPos = Vector3.new(myPos.x, myPos.y, myPos.z)
+                                                    
+                                                    -- Move to assigned position
+                                                    stopFollowing()
+                                                    startGotoWalk(targetPos)
+                                                    
+                                                    sendNotify("Formation", "Moving to assigned " .. formationShape .. " position")
+                                                else
+                                                    sendNotify("Formation", "No position assigned by commander")
+                                                end
                                             end
-                                            
-                                            -- Move to position once
-                                            stopFollowing()
-                                            startGotoWalk(targetPos)
-                                            
-                                            sendNotify("Formation", "Moving to " .. formationShape .. " position")
                                         end
                                     end
                                 elseif action == "formation_clear" then
