@@ -1,4 +1,6 @@
 ﻿const http = require('http');
+const fs = require('fs');
+const path = require('path');
 
 const IMPULSES = new Set(["rejoin", "reset", "reload"]);
 const BODY_LIMIT_BYTES = 8 * 1024;
@@ -16,11 +18,49 @@ const commandHistory = new Map(); // commandId -> { id, action, time, type, exec
 const MAX_HISTORY = 100;
 let impulseTimer = null;
 const clientInventories = new Map(); // clientId -> { data, timestamp }
-// Server-wide configurations
+
+// Storage path
+const STORAGE_DIR = path.join(__dirname, 'storage');
+const CONFIG_FILE = path.join(STORAGE_DIR, 'config.json');
+
+// Ensure storage directory exists
+if (!fs.existsSync(STORAGE_DIR)) {
+    fs.mkdirSync(STORAGE_DIR);
+}
+
+// Server-wide configurations with persistence
 let serverConfigs = {
     auto_pickup: false,
-    pickup_whitelist: [] // List of item names (strings)
+    pickup_whitelist: [], // List of item names (strings)
+    routes: {}            // Saved routes: { name: { waypoints: [...] } }
 };
+
+const loadConfig = () => {
+    if (fs.existsSync(CONFIG_FILE)) {
+        try {
+            const data = fs.readFileSync(CONFIG_FILE, 'utf8');
+            const parsed = JSON.parse(data);
+            serverConfigs = { ...serverConfigs, ...parsed };
+            console.log(`[STORAGE] Config loaded from ${CONFIG_FILE}`);
+        } catch (e) {
+            console.error(`[STORAGE] Error loading config: ${e.message}`);
+        }
+    } else {
+        console.log(`[STORAGE] No config file found, using defaults.`);
+    }
+};
+
+const saveConfig = () => {
+    try {
+        fs.writeFileSync(CONFIG_FILE, JSON.stringify(serverConfigs, null, 4));
+        console.log(`[STORAGE] Config saved to ${CONFIG_FILE}`);
+    } catch (e) {
+        console.error(`[STORAGE] Error saving config: ${e.message}`);
+    }
+};
+
+// Initial load
+loadConfig();
 
 // Formation state
 let formationState = {
@@ -312,6 +352,13 @@ const server = http.createServer((req, res) => {
             return;
         }
 
+        // List routes endpoint
+        if (req.url === '/routes') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(serverConfigs.routes || {}));
+            return;
+        }
+
         res.writeHead(404);
         res.end('Not Found');
         return;
@@ -547,6 +594,7 @@ const server = http.createServer((req, res) => {
                     if (newConfig.pickup_whitelist !== undefined && Array.isArray(newConfig.pickup_whitelist)) {
                         serverConfigs.pickup_whitelist = newConfig.pickup_whitelist;
                     }
+                    saveConfig();
                     console.log(`[CONFIG] Updated: auto_pickup=${serverConfigs.auto_pickup}, whitelist=[${serverConfigs.pickup_whitelist.join(', ')}]`);
                     updateCommand("refresh_configs", "CONFIG_UPDATE");
                     res.writeHead(200);
@@ -556,6 +604,44 @@ const server = http.createServer((req, res) => {
                     res.end('Invalid config data');
                 }
             });
+            return;
+        }
+
+        // Route save/update endpoint
+        if (req.url === '/routes') {
+            let body = '';
+            req.on('data', chunk => { body += chunk.toString(); });
+            req.on('end', () => {
+                try {
+                    const { name, waypoints } = JSON.parse(body);
+                    if (!name || !waypoints) throw new Error("Missing name or waypoints");
+                    
+                    serverConfigs.routes[name] = { waypoints };
+                    saveConfig();
+                    console.log(`[ROUTES] Saved route: ${name}`);
+                    res.writeHead(200);
+                    res.end('Route Saved');
+                } catch (e) {
+                    res.writeHead(400);
+                    res.end('Invalid route data: ' + e.message);
+                }
+            });
+            return;
+        }
+
+        // Route delete endpoint
+        if (req.url.startsWith('/routes/')) {
+            const routeName = decodeURIComponent(req.url.slice(8));
+            if (serverConfigs.routes[routeName]) {
+                delete serverConfigs.routes[routeName];
+                saveConfig();
+                console.log(`[ROUTES] Deleted route: ${routeName}`);
+                res.writeHead(200);
+                res.end('Route Deleted');
+            } else {
+                res.writeHead(404);
+                res.end('Route not found');
+            }
             return;
         }
 

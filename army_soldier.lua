@@ -7,7 +7,7 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 -- Forward declarations
-local highlightPlayers, clearHighlights, startFollowing, stopFollowing, startFollowingPosition, stopFollowingPosition, sendCommand, stopGotoWalk
+local highlightPlayers, clearHighlights, startFollowing, stopFollowing, startFollowingPosition, stopFollowingPosition, sendCommand, stopGotoWalk, stopFarming, stopRoute, showRouteManager, startRouteExecution, fetchRoutes, syncSaveRoute, syncDeleteRoute
 local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
 
@@ -90,6 +90,9 @@ local formationIndex = nil -- This client's assigned index in formation
 local formationActive = false
 local formationLeaderId = nil
 local formationOffsets = nil -- Map of userId -> {x, y, z} relative offsets
+local farmToken = 0
+local routeToken = 0
+local savedRoutes = {} -- Map of name -> {waypoints = {{pos={x,y,z}, autoJump=bool}, ...}}
 
 
 -- Centralized Network Request Helper
@@ -205,6 +208,8 @@ local function cancelCurrentOrder(isFromCommander)
     toggleClicking(false)
 
     cancelPendingClick()
+    stopFarming()
+    stopRoute()
 
     -- Also cancel any in-progress Humanoid MoveTo that might keep walking even after our loops stop.
     local myChar = LocalPlayer.Character
@@ -519,6 +524,79 @@ stopGotoWalk = function()
         gotoConnection = nil
     end
     moveTarget = nil
+end
+
+stopFarming = function()
+    farmToken = farmToken + 1
+    stopGotoWalk()
+end
+
+stopRoute = function()
+    routeToken = routeToken + 1
+    stopGotoWalk()
+end
+
+startRouteExecution = function(waypoints)
+    stopRoute()
+    local myToken = routeToken
+    
+    task.spawn(function()
+        sendNotify("Route", "Starting route execution (" .. #waypoints .. " points)")
+        for i, wp in ipairs(waypoints) do
+            if not isRunning or myToken ~= routeToken then break end
+            
+            -- Apply AutoJump setting for this leg of the journey
+            autoJumpEnabled = wp.autoJump
+            
+            local targetPos = Vector3.new(wp.pos.x, wp.pos.y, wp.pos.z)
+            print("[ROUTE] Moving to point " .. i .. "/" .. #waypoints .. " @ " .. tostring(targetPos) .. " (AutoJump: " .. tostring(autoJumpEnabled) .. ")")
+            
+            local reached = walkToUntilWithin(targetPos, 6)
+            if not reached then
+                sendNotify("Route", "Route aborted - blocked at point " .. i)
+                break
+            end
+        end
+        
+        if myToken == routeToken then
+            sendNotify("Route", "Route completed")
+        end
+    end)
+end
+
+fetchRoutes = function()
+    if not networkRequest then return end
+    local success, response = robustRequest({
+        Url = SERVER_URL .. "/routes",
+        Method = "GET"
+    })
+    if success and response and response.Body then
+        local jsonSuccess, data = pcall(function()
+            return HttpService:JSONDecode(response.Body)
+        end)
+        if jsonSuccess and data then
+            savedRoutes = data
+            return true
+        end
+    end
+    return false
+end
+
+syncSaveRoute = function(name, waypoints)
+    if not networkRequest then return end
+    robustRequest({
+        Url = SERVER_URL .. "/routes",
+        Method = "POST",
+        Body = HttpService:JSONEncode({ name = name, waypoints = waypoints })
+    })
+end
+
+syncDeleteRoute = function(name)
+    if not networkRequest then return end
+    robustRequest({
+        Url = SERVER_URL .. "/routes/" .. HttpService:UrlEncode(name),
+        Method = "DELETE"
+    })
 end
 
 -- Centralized movement helpers so actions (tween/slide/walk/formation) reuse the same codepaths.
@@ -1876,6 +1954,12 @@ local function terminateScript()
         if inv then inv:Destroy() end
         local dlg = pg and pg:FindFirstChild("ArmySearchDialog")
         if dlg then dlg:Destroy() end
+        local pkm = pg and pg:FindFirstChild("ArmyPickupManager")
+        if pkm then pkm:Destroy() end
+        local tlm = pg and pg:FindFirstChild("ArmyToolsMenu")
+        if tlm then tlm:Destroy() end
+        local frm = pg and pg:FindFirstChild("ArmyFarmMenu")
+        if frm then frm:Destroy() end
     end)
 
     for _, conn in ipairs(connections) do
@@ -1930,7 +2014,7 @@ local function showPickupManager()
     close.Size = UDim2.new(0, 30, 0, 30)
     close.Position = UDim2.new(1, -40, 0, 10)
     close.BackgroundTransparency = 1
-    close.Text = "✕"
+    close.Text = "X"
     close.TextColor3 = Color3.fromRGB(200, 200, 200)
     close.TextSize = 18
     close.Font = Enum.Font.GothamBold
@@ -2048,6 +2132,598 @@ local function showPickupManager()
     end)
     
     refreshWhitelist()
+end
+
+local function startFarmingTarget(targetPos)
+    stopFarming()
+    local myToken = farmToken
+    
+    task.spawn(function()
+        local targetObject = nil
+        -- Find object at targetPos
+        local function getClosestPointOnPart(part, point)
+            local partCFrame = part.CFrame
+            local size = part.Size
+            
+            -- Transform point to object space
+            local localPoint = partCFrame:PointToObjectSpace(point)
+            
+            -- Clamp point within part size boundaries
+            local halfSize = size / 2
+            local clampedLocal = Vector3.new(
+                math.clamp(localPoint.X, -halfSize.X, halfSize.X),
+                math.clamp(localPoint.Y, -halfSize.Y, halfSize.Y),
+                math.clamp(localPoint.Z, -halfSize.Z, halfSize.Z)
+            )
+            
+            -- Transform back to world space
+            return partCFrame:PointToWorldSpace(clampedLocal)
+        end
+
+        local function findTarget()
+            local resources = workspace:FindFirstChild("Resources")
+            if resources then
+                for _, child in ipairs(resources:GetChildren()) do
+                    local pos = child:IsA("BasePart") and child.Position or (child:IsA("Model") and child.PrimaryPart and child.PrimaryPart.Position)
+                    if pos and (pos - targetPos).Magnitude < 5 then
+                        if child:GetAttribute("EntityID") then
+                            return child
+                        end
+                    end
+                end
+            end
+            return nil
+        end
+        
+        targetObject = findTarget()
+        if not targetObject then
+            sendNotify("Farm", "Target not found at position")
+            return
+        end
+        
+        local lastPos = nil
+        local lastMoveTime = os.clock()
+        local swingDelay = 0.05
+        local lastSwing = 0
+        
+        while isRunning and myToken == farmToken do
+            if not targetObject or not targetObject.Parent then
+                -- Re-scan briefly in case it moved or was replaced
+                targetObject = findTarget()
+                if not targetObject then break end
+            end
+            
+            local char, humanoid, root = getMyRig()
+            if not char or not root then break end
+            
+            local currentPos = root.Position
+            local targetPart = targetObject:IsA("BasePart") and targetObject or (targetObject:IsA("Model") and targetObject.PrimaryPart)
+            if not targetPart then break end
+            
+            local objPos = targetPart.Position
+            local closestWorld = getClosestPointOnPart(targetPart, currentPos)
+            
+            -- Use 2D distance to closest point on surface for stopping
+            local dist2D = (Vector3.new(currentPos.X, 0, currentPos.Z) - Vector3.new(closestWorld.X, 0, closestWorld.Z)).Magnitude
+            
+            -- Movement and Stuck Detection
+            if dist2D > 6 then
+                Movement.walkTo(objPos) -- Walk towards center for pathfinding
+                
+                if not lastPos or (currentPos - lastPos).Magnitude > 1 then
+                    lastPos = currentPos
+                    lastMoveTime = os.clock()
+                elseif os.clock() - lastMoveTime > 2 then
+                    -- Stuck for 2s: cancel
+                    sendNotify("Farm", "Soldier stuck - cancelling farm")
+                    stopFarming()
+                    break
+                end
+            else
+                stopGotoWalk()
+                -- Reset stuck timer while farming
+                lastPos = currentPos
+                lastMoveTime = os.clock()
+                
+                -- Look at target (center)
+                pcall(function()
+                    root.CFrame = CFrame.new(root.Position, Vector3.new(objPos.X, root.Position.Y, objPos.Z))
+                end)
+            end
+            
+            -- Swing Logic: Use distance to surface for hitting
+            local dist3D = (currentPos - closestWorld).Magnitude
+            if dist3D <= 15 and os.clock() - lastSwing >= swingDelay then
+                local eid = targetObject:GetAttribute("EntityID")
+                if eid then
+                    lastSwing = os.clock()
+                    local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
+                    if ByteNetRemote then
+                        local b = buffer.create(8)
+                        buffer.writeu8(b, 0, 0)
+                        buffer.writeu8(b, 1, 17) -- SwingTool
+                        buffer.writeu16(b, 2, 1) -- count
+                        buffer.writeu32(b, 4, eid)
+                        ByteNetRemote:FireServer(b)
+                    end
+                end
+            end
+            
+            task.wait(0.1)
+        end
+        
+        if myToken == farmToken then
+            sendNotify("Farm", "Target depleted or lost")
+            stopFarming()
+        end
+    end)
+end
+
+local function showFarmMenu()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return end
+    
+    if pg:FindFirstChild("ArmyFarmMenu") then
+        pg.ArmyFarmMenu:Destroy()
+    end
+    
+    local screenGui = Instance.new("ScreenGui", pg)
+    screenGui.Name = "ArmyFarmMenu"
+    screenGui.ResetOnSpawn = false
+    
+    local panel = Instance.new("Frame", screenGui)
+    panel.Size = UDim2.new(0, 250, 0, 150)
+    panel.Position = UDim2.new(0.5, -125, 0.5, -75)
+    panel.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+    panel.BorderSizePixel = 0
+    Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 10)
+    Instance.new("UIStroke", panel).Color = Color3.fromRGB(60, 60, 70)
+    
+    local header = Instance.new("Frame", panel)
+    header.Size = UDim2.new(1, 0, 0, 45)
+    header.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+    header.BorderSizePixel = 0
+    Instance.new("UICorner", header)
+    
+    local title = Instance.new("TextLabel", header)
+    title.Size = UDim2.new(1, -50, 1, 0)
+    title.Position = UDim2.new(0, 15, 0, 0)
+    title.BackgroundTransparency = 1
+    title.Text = "FARM MANAGER"
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.TextSize = 16
+    title.Font = Enum.Font.GothamBold
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    
+    local close = Instance.new("TextButton", header)
+    close.Size = UDim2.new(0, 30, 0, 30)
+    close.Position = UDim2.new(1, -40, 0, 7)
+    close.BackgroundTransparency = 1
+    close.Text = "X"
+    close.TextColor3 = Color3.fromRGB(200, 200, 200)
+    close.TextSize = 18
+    close.Font = Enum.Font.GothamBold
+    close.MouseButton1Click:Connect(function() screenGui:Destroy() end)
+    
+    local singleBtn = Instance.new("TextButton", panel)
+    singleBtn.Size = UDim2.new(1, -20, 0, 40)
+    singleBtn.Position = UDim2.new(0, 10, 0, 60)
+    singleBtn.BackgroundColor3 = Color3.fromRGB(255, 150, 50)
+    singleBtn.Text = "Single Target"
+    singleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    singleBtn.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", singleBtn)
+    
+    singleBtn.MouseButton1Click:Connect(function()
+        screenGui:Destroy()
+        sendNotify("Farm", "Click an object to set as army target")
+        setPendingClick(Mouse.Button1Down:Connect(function()
+            local target = Mouse.Target
+            if target then
+                if target:IsA("Terrain") then
+                    return -- Ignore terrain, allow another click
+                end
+                
+                local resources = workspace:FindFirstChild("Resources")
+                if not (resources and target:IsDescendantOf(resources)) then
+                    sendNotify("Farm", "Invalid target (not in Resources) - cancelled")
+                    cancelPendingClick()
+                    return
+                end
+                
+                -- Find the direct child of Resources that contains the clicked part
+                local resourceModel = target
+                while resourceModel and resourceModel.Parent ~= resources do
+                    resourceModel = resourceModel.Parent
+                    if resourceModel == workspace or not resourceModel then
+                        break
+                    end
+                end
+                
+                if not resourceModel or resourceModel.Parent ~= resources then
+                    sendNotify("Farm", "Error: Parent resource not found - cancelled")
+                    cancelPendingClick()
+                    return
+                end
+                
+                local targetPos = resourceModel:IsA("BasePart") and resourceModel.Position or (resourceModel:IsA("Model") and resourceModel.PrimaryPart and resourceModel.PrimaryPart.Position) or target.Position
+                sendCommand(string.format("farm_target %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z))
+                sendNotify("Farm", "All soldiers targeting object: " .. resourceModel.Name)
+                cancelPendingClick()
+            end
+        end), nil)
+    end)
+end
+
+local function showToolsMenu()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return end
+    
+    if pg:FindFirstChild("ArmyToolsMenu") then
+        pg.ArmyToolsMenu:Destroy()
+    end
+    
+    local screenGui = Instance.new("ScreenGui", pg)
+    screenGui.Name = "ArmyToolsMenu"
+    screenGui.ResetOnSpawn = false
+    
+    local panel = Instance.new("Frame", screenGui)
+    panel.Size = UDim2.new(0, 250, 0, 180)
+    panel.Position = UDim2.new(0.5, -125, 0.5, -90)
+    panel.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+    panel.BorderSizePixel = 0
+    Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 10)
+    Instance.new("UIStroke", panel).Color = Color3.fromRGB(60, 60, 70)
+    
+    local header = Instance.new("Frame", panel)
+    header.Size = UDim2.new(1, 0, 0, 45)
+    header.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+    header.BorderSizePixel = 0
+    Instance.new("UICorner", header)
+    
+    local title = Instance.new("TextLabel", header)
+    title.Size = UDim2.new(1, -50, 1, 0)
+    title.Position = UDim2.new(0, 15, 0, 0)
+    title.BackgroundTransparency = 1
+    title.Text = "TOOLS"
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.TextSize = 16
+    title.Font = Enum.Font.GothamBold
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    
+    local close = Instance.new("TextButton", header)
+    close.Size = UDim2.new(0, 30, 0, 30)
+    close.Position = UDim2.new(1, -40, 0, 7)
+    close.BackgroundTransparency = 1
+    close.Text = "X"
+    close.TextColor3 = Color3.fromRGB(200, 200, 200)
+    close.TextSize = 18
+    close.Font = Enum.Font.GothamBold
+    close.MouseButton1Click:Connect(function() screenGui:Destroy() end)
+    
+    local equipBtn = Instance.new("TextButton", panel)
+    equipBtn.Size = UDim2.new(1, -20, 0, 40)
+    equipBtn.Position = UDim2.new(0, 10, 0, 60)
+    equipBtn.BackgroundColor3 = Color3.fromRGB(100, 200, 255)
+    equipBtn.Text = "Equip Tool"
+    equipBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    equipBtn.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", equipBtn)
+    equipBtn.MouseButton1Click:Connect(function() 
+        screenGui:Destroy()
+        showToolSearchDialog() 
+    end)
+    
+    local unequipBtn = Instance.new("TextButton", panel)
+    unequipBtn.Size = UDim2.new(1, -20, 0, 40)
+    unequipBtn.Position = UDim2.new(0, 10, 0, 110)
+    unequipBtn.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+    unequipBtn.Text = "Unequip Tools"
+    unequipBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    unequipBtn.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", unequipBtn)
+    unequipBtn.MouseButton1Click:Connect(function() 
+        screenGui:Destroy()
+        sendCommand("unequip_all")
+        sendNotify("Equip", "Army clearing toolbar to inventory")
+    end)
+end
+
+local function showRouteEditor(routeName)
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return end
+    
+    local screenGui = Instance.new("ScreenGui", pg)
+    screenGui.Name = "ArmyRouteEditor"
+    screenGui.ResetOnSpawn = false
+    
+    local panel = Instance.new("Frame", screenGui)
+    panel.Size = UDim2.new(0, 300, 0, 400)
+    panel.Position = UDim2.new(0.5, -150, 0.5, -200)
+    panel.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+    panel.BorderSizePixel = 0
+    Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 12)
+    Instance.new("UIStroke", panel).Color = Color3.fromRGB(60, 60, 70)
+    
+    local header = Instance.new("Frame", panel)
+    header.Size = UDim2.new(1, 0, 0, 50)
+    header.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+    header.BorderSizePixel = 0
+    Instance.new("UICorner", header)
+    
+    local title = Instance.new("TextLabel", header)
+    title.Size = UDim2.new(1, -100, 1, 0)
+    title.Position = UDim2.new(0, 15, 0, 0)
+    title.BackgroundTransparency = 1
+    title.Text = "NEW ROUTE: " .. string.upper(routeName)
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.TextSize = 14
+    title.Font = Enum.Font.GothamBold
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    
+    local close = Instance.new("TextButton", header)
+    close.Size = UDim2.new(0, 30, 0, 30)
+    close.Position = UDim2.new(1, -40, 0, 10)
+    close.BackgroundTransparency = 1
+    close.Text = "X"
+    close.TextColor3 = Color3.fromRGB(200, 200, 200)
+    close.TextSize = 18
+    close.Font = Enum.Font.GothamBold
+    close.MouseButton1Click:Connect(function() 
+        screenGui:Destroy() 
+        showRouteManager()
+    end)
+    
+    local content = Instance.new("ScrollingFrame", panel)
+    content.Size = UDim2.new(1, -20, 1, -130)
+    content.Position = UDim2.new(0, 10, 0, 60)
+    content.BackgroundTransparency = 1
+    content.BorderSizePixel = 0
+    content.ScrollBarThickness = 2
+    content.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    
+    local list = Instance.new("UIListLayout", content)
+    list.Padding = UDim.new(0, 5)
+    
+    local waypoints = {}
+    local currentAutoJump = true
+    
+    local function refreshList()
+        for _, child in ipairs(content:GetChildren()) do
+            if child:IsA("Frame") then child:Destroy() end
+        end
+        for i, wp in ipairs(waypoints) do
+            local f = Instance.new("Frame", content)
+            f.Size = UDim2.new(1, 0, 0, 25)
+            f.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+            f.BorderSizePixel = 0
+            Instance.new("UICorner", f).CornerRadius = UDim.new(0, 4)
+            
+            local l = Instance.new("TextLabel", f)
+            l.Size = UDim2.new(1, -10, 1, 0)
+            l.Position = UDim2.new(0, 10, 0, 0)
+            l.BackgroundTransparency = 1
+            l.Text = string.format("%d. (%.1f, %.1f, %.1f) | Jump: %s", i, wp.pos.x, wp.pos.y, wp.pos.z, tostring(wp.autoJump))
+            l.TextColor3 = Color3.fromRGB(180, 180, 180)
+            l.TextSize = 11
+            l.Font = Enum.Font.Gotham
+            l.TextXAlignment = Enum.TextXAlignment.Left
+        end
+    end
+    
+    local jumpToggle = Instance.new("TextButton", panel)
+    jumpToggle.Size = UDim2.new(1, -20, 0, 30)
+    jumpToggle.Position = UDim2.new(0, 10, 1, -110)
+    jumpToggle.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
+    jumpToggle.Text = "AutoJump: ON"
+    jumpToggle.TextColor3 = Color3.fromRGB(100, 255, 150)
+    jumpToggle.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", jumpToggle)
+    
+    jumpToggle.MouseButton1Click:Connect(function()
+        currentAutoJump = not currentAutoJump
+        jumpToggle.Text = "AutoJump: " .. (currentAutoJump and "ON" or "OFF")
+        jumpToggle.TextColor3 = currentAutoJump and Color3.fromRGB(100, 255, 150) or Color3.fromRGB(255, 100, 100)
+    end)
+    
+    local setBtn = Instance.new("TextButton", panel)
+    setBtn.Size = UDim2.new(0.48, 0, 0, 35)
+    setBtn.Position = UDim2.new(0, 10, 1, -70)
+    setBtn.BackgroundColor3 = Color3.fromRGB(100, 200, 255)
+    setBtn.Text = "Set Point"
+    setBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    setBtn.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", setBtn)
+    
+    setBtn.MouseButton1Click:Connect(function()
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if root then
+            local pos = root.Position
+            table.insert(waypoints, {
+                pos = {x = pos.X, y = pos.Y, z = pos.Z},
+                autoJump = currentAutoJump
+            })
+            refreshList()
+        end
+    end)
+    
+    local saveBtn = Instance.new("TextButton", panel)
+    saveBtn.Size = UDim2.new(0.48, 0, 0, 35)
+    saveBtn.Position = UDim2.new(0.52, 0, 1, -70)
+    saveBtn.BackgroundColor3 = Color3.fromRGB(150, 120, 255)
+    saveBtn.Text = "Save Route"
+    saveBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    saveBtn.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", saveBtn)
+    
+    saveBtn.MouseButton1Click:Connect(function()
+        if #waypoints > 0 then
+            savedRoutes[routeName] = { waypoints = waypoints }
+            syncSaveRoute(routeName, waypoints)
+            screenGui:Destroy()
+            showRouteManager()
+        else
+            sendNotify("Error", "Route needs at least 1 point")
+        end
+    end)
+    
+    local clearBtn = Instance.new("TextButton", panel)
+    clearBtn.Size = UDim2.new(1, -20, 0, 25)
+    clearBtn.Position = UDim2.new(0, 10, 1, -30)
+    clearBtn.BackgroundTransparency = 1
+    clearBtn.Text = "Cancel & Back"
+    clearBtn.TextColor3 = Color3.fromRGB(150, 150, 160)
+    clearBtn.TextSize = 12
+    clearBtn.Font = Enum.Font.Gotham
+    clearBtn.MouseButton1Click:Connect(function()
+        screenGui:Destroy()
+        showRouteManager()
+    end)
+end
+
+showRouteManager = function()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return end
+    
+    if pg:FindFirstChild("ArmyRouteManager") then pg.ArmyRouteManager:Destroy() end
+    
+    local screenGui = Instance.new("ScreenGui", pg)
+    screenGui.Name = "ArmyRouteManager"
+    screenGui.ResetOnSpawn = false
+    
+    local panel = Instance.new("Frame", screenGui)
+    panel.Size = UDim2.new(0, 320, 0, 350)
+    panel.Position = UDim2.new(0.5, -160, 0.5, -175)
+    panel.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+    panel.BorderSizePixel = 0
+    Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 12)
+    Instance.new("UIStroke", panel).Color = Color3.fromRGB(60, 60, 70)
+    
+    local header = Instance.new("Frame", panel)
+    header.Size = UDim2.new(1, 0, 0, 50)
+    header.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+    header.BorderSizePixel = 0
+    Instance.new("UICorner", header)
+    
+    local title = Instance.new("TextLabel", header)
+    title.Size = UDim2.new(1, -100, 1, 0)
+    title.Position = UDim2.new(0, 15, 0, 0)
+    title.BackgroundTransparency = 1
+    title.Text = "ROUTE MANAGER"
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.TextSize = 16
+    title.Font = Enum.Font.GothamBold
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    
+    local addBtn = Instance.new("TextButton", header)
+    addBtn.Size = UDim2.new(0, 35, 0, 35)
+    addBtn.Position = UDim2.new(1, -80, 0, 7)
+    addBtn.BackgroundColor3 = Color3.fromRGB(100, 255, 150)
+    addBtn.Text = "+"
+    addBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    addBtn.TextSize = 24
+    addBtn.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", addBtn)
+    
+    addBtn.MouseButton1Click:Connect(function()
+        screenGui:Destroy()
+        local name = "Route " .. (os.time() % 1000)
+        showRouteEditor(name)
+    end)
+    
+    local close = Instance.new("TextButton", header)
+    close.Size = UDim2.new(0, 30, 0, 30)
+    close.Position = UDim2.new(1, -40, 0, 10)
+    close.BackgroundTransparency = 1
+    close.Text = "X"
+    close.TextColor3 = Color3.fromRGB(200, 200, 200)
+    close.TextSize = 18
+    close.Font = Enum.Font.GothamBold
+    close.MouseButton1Click:Connect(function() screenGui:Destroy() end)
+    
+    local content = Instance.new("ScrollingFrame", panel)
+    content.Size = UDim2.new(1, -20, 1, -60)
+    content.Position = UDim2.new(0, 10, 0, 60)
+    content.BackgroundTransparency = 1
+    content.BorderSizePixel = 0
+    content.ScrollBarThickness = 4
+    content.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    
+    local list = Instance.new("UIListLayout", content)
+    list.Padding = UDim.new(0, 10)
+    
+    local function refreshRoutes()
+        for _, child in ipairs(content:GetChildren()) do
+            if child:IsA("Frame") then child:Destroy() end
+        end
+        
+        local any = false
+        for name, data in pairs(savedRoutes) do
+            any = true
+            local row = Instance.new("Frame", content)
+            row.Size = UDim2.new(1, 0, 0, 50)
+            row.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
+            Instance.new("UICorner", row)
+            
+            local l = Instance.new("TextLabel", row)
+            l.Size = UDim2.new(1, -120, 1, 0)
+            l.Position = UDim2.new(0, 10, 0, 0)
+            l.BackgroundTransparency = 1
+            l.Text = name .. " (" .. #data.waypoints .. " pts)"
+            l.TextColor3 = Color3.fromRGB(220, 220, 220)
+            l.TextSize = 13
+            l.Font = Enum.Font.GothamSemibold
+            l.TextXAlignment = Enum.TextXAlignment.Left
+            
+            local play = Instance.new("TextButton", row)
+            play.Size = UDim2.new(0, 50, 0, 30)
+            play.Position = UDim2.new(1, -100, 0.5, -15)
+            play.BackgroundColor3 = Color3.fromRGB(150, 120, 255)
+            play.Text = "Play"
+            play.TextColor3 = Color3.fromRGB(255, 255, 255)
+            play.Font = Enum.Font.GothamBold
+            Instance.new("UICorner", play)
+            
+            play.MouseButton1Click:Connect(function()
+                local json = HttpService:JSONEncode({ waypoints = data.waypoints })
+                sendCommand("execute_route " .. json)
+                sendNotify("Route", "Broadcasting route: " .. name)
+                screenGui:Destroy()
+            end)
+            
+            local del = Instance.new("TextButton", row)
+            del.Size = UDim2.new(0, 30, 0, 30)
+            del.Position = UDim2.new(1, -40, 0.5, -15)
+            del.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+            del.Text = "X"
+            del.TextColor3 = Color3.fromRGB(255, 255, 255)
+            del.Font = Enum.Font.GothamBold
+            Instance.new("UICorner", del)
+            
+            del.MouseButton1Click:Connect(function()
+                savedRoutes[name] = nil
+                syncDeleteRoute(name)
+                refreshRoutes()
+            end)
+        end
+        
+        if not any then
+            local empty = Instance.new("TextLabel", content)
+            empty.Size = UDim2.new(1, 0, 0, 50)
+            empty.BackgroundTransparency = 1
+            empty.Text = "No routes saved."
+            empty.TextColor3 = Color3.fromRGB(100, 100, 110)
+            empty.TextSize = 13
+            empty.Font = Enum.Font.Item
+        end
+    end
+    
+    task.spawn(function()
+        if fetchRoutes() then
+            refreshRoutes()
+        end
+    end)
 end
 
 -- Create Modern Sidebar Panel
@@ -2674,6 +3350,13 @@ local function createPanel()
                     
                     -- Timeout removed per user request
                 end
+            },
+            {
+                Text = "Route",
+                Color = Color3.fromRGB(150, 120, 255),
+                Callback = function()
+                    showRouteManager()
+                end
             }
         }
     })
@@ -3103,18 +3786,10 @@ local function createPanel()
                     end
                 },
                 {
-                    Text = "Equip Tool",
+                    Text = "Tools",
                     Color = Color3.fromRGB(100, 200, 255),
                     Callback = function()
-                        showToolSearchDialog()
-                    end
-                },
-                {
-                    Text = "Unequip All",
-                    Color = Color3.fromRGB(200, 200, 200),
-                    Callback = function()
-                        sendCommand("unequip_all")
-                        sendNotify("Equip", "Army clearing toolbar to inventory")
+                        showToolsMenu()
                     end
                 },
                 {
@@ -3122,6 +3797,13 @@ local function createPanel()
                     Color = Color3.fromRGB(100, 255, 150),
                     Callback = function()
                         showPickupManager()
+                    end
+                },
+                {
+                    Text = "Farm",
+                    Color = Color3.fromRGB(255, 150, 50),
+                    Callback = function()
+                        showFarmMenu()
                     end
                 }
             }
@@ -3179,6 +3861,19 @@ table.insert(connections, UserInputService.InputBegan:Connect(function(input, pr
             task.delay(0.3, function()
                 if not isPanelOpen and panelGui then
                     panelGui.Enabled = false
+                    -- Close any open sub-menus
+                    pcall(function()
+                        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+                        if pg then
+                            if pg:FindFirstChild("ArmyInventoryManager") then pg.ArmyInventoryManager:Destroy() end
+                            if pg:FindFirstChild("ArmySearchDialog") then pg.ArmySearchDialog:Destroy() end
+                            if pg:FindFirstChild("ArmyPickupManager") then pg.ArmyPickupManager:Destroy() end
+                            if pg:FindFirstChild("ArmyToolsMenu") then pg.ArmyToolsMenu:Destroy() end
+                            if pg:FindFirstChild("ArmyFarmMenu") then pg.ArmyFarmMenu:Destroy() end
+                            if pg:FindFirstChild("ArmyRouteManager") then pg.ArmyRouteManager:Destroy() end
+                            if pg:FindFirstChild("ArmyRouteEditor") then pg.ArmyRouteEditor:Destroy() end
+                        end
+                    end)
                 end
             end)
     end
@@ -3311,6 +4006,23 @@ while isRunning do
                                     end)
 
                                     acknowledgeCommand(commandId, true, reportPayload)
+                                    return true
+                                elseif string.sub(action, 1, 12) == "farm_target " then
+                                    local coordsStr = string.sub(action, 13)
+                                    local coords = string.split(coordsStr, ",")
+                                    if #coords == 3 then
+                                        local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
+                                        startFarmingTarget(targetPos)
+                                    end
+                                    return true
+                                elseif string.sub(action, 1, 14) == "execute_route " then
+                                    local json = string.sub(action, 15)
+                                    local success, data = pcall(function()
+                                        return HttpService:JSONDecode(json)
+                                    end)
+                                    if success and data and data.waypoints then
+                                        startRouteExecution(data.waypoints)
+                                    end
                                     return true
                                 elseif string.sub(action, 1, 15) == "target_drop_at " then
                                     -- Format: target_drop_at <clientId> <x,y,z> <name...> <qty>
