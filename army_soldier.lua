@@ -748,6 +748,25 @@ local function updateHolographicCubes(position, shape, clientCount, baseCFrame)
     createHolographicCubes(position, shape, clientCount, baseCFrame)
 end
 
+local function fireVoodoo(targetPos)
+    local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
+    if not ByteNetRemote then return end
+    
+    for i = 1, 3 do
+        -- Create 14-byte buffer: [0][10][f32][f32][f32]
+        local b = buffer.create(14)
+        buffer.writeu8(b, 0, 0)   -- Namespace 0
+        buffer.writeu8(b, 1, 10)  -- Packet ID 10
+        buffer.writef32(b, 2, targetPos.X)
+        buffer.writef32(b, 6, targetPos.Y)
+        buffer.writef32(b, 10, targetPos.Z)
+        
+        -- Fire the buffer object DIRECTLY
+        ByteNetRemote:FireServer(b)
+        task.wait(0.05) -- Small delay between fires for maximum impact
+    end
+end
+
 local function terminateScript()
     isRunning = false
     sendNotify("Army Script", "Script Terminated")
@@ -1768,12 +1787,39 @@ local function createPanel()
         }
     })
 
+    -- Booga Booga Drawer
+    local boogaDrawer = createDrawer({
+        Title = "Booga Booga",
+        Description = "Booga Booga special actions",
+        Icon = "👺",
+        Color = Color3.fromRGB(255, 100, 50),
+        Buttons = {
+            {
+                Text = "Auto Voodoo",
+                Color = Color3.fromRGB(200, 100, 255),
+                Callback = function()
+                    sendNotify("Auto Voodoo", "Click where you want soldiers to fire voodoo")
+                    setPendingClick(Mouse.Button1Down:Connect(function()
+                        if Mouse.Hit then
+                            local targetPos = Mouse.Hit.Position
+                            local voodooCmd = string.format("voodoo %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
+                            sendCommand(voodooCmd)
+                            sendNotify("Voodoo", "Soldiers firing voodoo at target")
+                            cancelPendingClick()
+                        end
+                    end), nil)
+                end
+            }
+        }
+    })
+
     -- Re-order drawers to match the desired tab order:
-    -- Movement, Follow, Formation, Accounts
+    -- Movement, Follow, Formation, Booga Booga, Accounts
     movementDrawer.Container.LayoutOrder = 1
     followDrawer.Container.LayoutOrder = 2
     formationDrawer.Container.LayoutOrder = 3
-    serverDrawer.Container.LayoutOrder = 4
+    boogaDrawer.Container.LayoutOrder = 4
+    serverDrawer.Container.LayoutOrder = 5
 
     -- "System" is merged into "Accounts" now.
     systemDrawer.Container.Visible = false
@@ -2016,6 +2062,13 @@ while isRunning do
                                         end
                                         
                                         sendNotify("Formation", "Following " .. (userIdStr or "leader") .. " in " .. formationShape)
+                                    end
+                                elseif string.sub(action, 1, 7) == "voodoo " then
+                                    local coords = string.split(string.sub(action, 8), ",")
+                                    if #coords == 3 then
+                                        local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
+                                        fireVoodoo(targetPos)
+                                        print("[VOODOO] Fired at " .. tostring(targetPos))
                                     end
                                 elseif string.sub(action, 1, 15) == "formation_goto " then
                                     -- Format: formation_goto <x,y,z> <shape> <positions_json>
