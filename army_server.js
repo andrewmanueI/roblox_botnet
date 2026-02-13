@@ -16,9 +16,72 @@ const commandHistory = new Map(); // commandId -> { id, action, time, type, exec
 const MAX_HISTORY = 100;
 let impulseTimer = null;
 
+// Formation state
+let formationState = {
+    active: false,
+    mode: null,           // "Follow" or "Goto"
+    shape: null,          // "Line", "Row", or "Circle"
+    center: null,         // { x, y, z } for Goto mode
+    leaderId: null,       // UserId for Follow mode
+    assignments: new Map() // clientId -> formationIndex
+};
+
+// Formation position calculators
+const calculateFormationPositions = (shape, count, center = { x: 0, y: 0, z: 0 }) => {
+    const positions = [];
+    
+    if (shape === "Line") {
+        // Horizontal line
+        for (let i = 0; i < count; i++) {
+            positions.push({
+                x: center.x + (i - Math.floor(count / 2)) * 4,
+                y: center.y,
+                z: center.z
+            });
+        }
+    } else if (shape === "Row") {
+        // Rows of 3
+        const rowSize = 3;
+        for (let i = 0; i < count; i++) {
+            const row = Math.floor(i / rowSize);
+            const col = i % rowSize;
+            positions.push({
+                x: center.x + (col - 1) * 4,
+                y: center.y,
+                z: center.z + row * 4
+            });
+        }
+    } else if (shape === "Circle") {
+        // Circle formation
+        const radius = 15;
+        for (let i = 0; i < count; i++) {
+            const angle = (i / count) * Math.PI * 2;
+            positions.push({
+                x: center.x + Math.cos(angle) * radius,
+                y: center.y,
+                z: center.z + Math.sin(angle) * radius
+            });
+        }
+    }
+    
+    return positions;
+};
+
+const assignFormationPositions = () => {
+    const clientList = Array.from(clients.keys());
+    formationState.assignments.clear();
+    
+    clientList.forEach((clientId, index) => {
+        formationState.assignments.set(clientId, index);
+    });
+    
+    console.log(`[FORMATION] Assigned ${clientList.length} clients to formation positions`);
+};
+
 const generateClientId = () => {
     return crypto.randomUUID();
 };
+
 
 const updateCommand = (action, source) => {
     if (!action) return false;
@@ -314,11 +377,79 @@ const server = http.createServer((req, res) => {
 
             req.on('end', () => {
                 const newAction = body.trim();
-                if (!updateCommand(newAction, "HTTP")) {
-                    res.writeHead(400);
-                    res.end("Missing command");
-                    return;
+                
+                // Handle formation commands specially
+                if (newAction.startsWith('formation_follow ')) {
+                    // Format: formation_follow <userId> <shape>
+                    const parts = newAction.split(' ');
+                    if (parts.length >= 3) {
+                        formationState.active = true;
+                        formationState.mode = "Follow";
+                        formationState.leaderId = parts[1];
+                        formationState.shape = parts[2];
+                        formationState.center = null;
+                        assignFormationPositions();
+                        
+                        console.log(`[FORMATION] Follow mode: ${formationState.shape} around user ${formationState.leaderId}`);
+                        
+                        // Broadcast formation to all clients
+                        if (!updateCommand(newAction, "HTTP")) {
+                            res.writeHead(400);
+                            res.end("Missing command");
+                            return;
+                        }
+                    }
+                } else if (newAction.startsWith('formation_goto ')) {
+                    // Format: formation_goto <x,y,z> <shape>
+                    const parts = newAction.split(' ');
+                    if (parts.length >= 3) {
+                        const coords = parts[1].split(',');
+                        if (coords.length === 3) {
+                            formationState.active = true;
+                            formationState.mode = "Goto";
+                            formationState.shape = parts[2];
+                            formationState.center = {
+                                x: parseFloat(coords[0]),
+                                y: parseFloat(coords[1]),
+                                z: parseFloat(coords[2])
+                            };
+                            formationState.leaderId = null;
+                            assignFormationPositions();
+                            
+                            console.log(`[FORMATION] Goto mode: ${formationState.shape} at (${formationState.center.x}, ${formationState.center.y}, ${formationState.center.z})`);
+                            
+                            // Broadcast formation to all clients
+                            if (!updateCommand(newAction, "HTTP")) {
+                                res.writeHead(400);
+                                res.end("Missing command");
+                                return;
+                            }
+                        }
+                    }
+                } else if (newAction === 'formation_clear') {
+                    formationState.active = false;
+                    formationState.mode = null;
+                    formationState.shape = null;
+                    formationState.center = null;
+                    formationState.leaderId = null;
+                    formationState.assignments.clear();
+                    
+                    console.log(`[FORMATION] Cleared formation`);
+                    
+                    if (!updateCommand(newAction, "HTTP")) {
+                        res.writeHead(400);
+                        res.end("Missing command");
+                        return;
+                    }
+                } else {
+                    // Regular command
+                    if (!updateCommand(newAction, "HTTP")) {
+                        res.writeHead(400);
+                        res.end("Missing command");
+                        return;
+                    }
                 }
+                
                 res.writeHead(200);
                 res.end("Order Updated");
             });

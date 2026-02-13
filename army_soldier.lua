@@ -7,7 +7,7 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 -- Forward declarations
-local highlightPlayers, clearHighlights, startFollowing, stopFollowing, startFollowingPosition, stopFollowingPosition
+local highlightPlayers, clearHighlights, startFollowing, stopFollowing, startFollowingPosition, stopFollowingPosition, sendCommand, stopGotoWalk
 local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
 
@@ -42,6 +42,20 @@ local gotoDummyConnection = nil
 local autoJumpEnabled = false
 local gotoWalkToken = 0 -- increments to cancel any active goto walk loop
 local debugFollowCommands = false -- When true, commander will also execute server commands.
+local pendingMouseClickConnection = nil -- used for click-to-target modes; cancel should close it
+local pendingMouseClickCleanup = nil -- optional cleanup for pending click mode (e.g. clear highlights)
+local CANCEL_COOLDOWN = 0.35 -- seconds; prevents spamming cancel key
+local lastCancelTime = 0
+
+-- Formation state
+local formationMode = "Follow" -- "Follow" or "Goto"
+local formationShape = "Line" -- "Line", "Row", or "Circle"
+local formationHoloCubes = {} -- Array of holographic cube parts
+local formationIndex = nil -- This client's assigned index in formation
+local formationActive = false
+local formationLeaderId = nil
+local formationCenter = nil
+
 
 -- Background autojump loop: runs continuously and checks `autoJumpEnabled`.
 -- Mimics IY's `autojump`: cast two short rays forward; if either hits, trigger a jump.
@@ -88,6 +102,62 @@ local function toggleClicking(state)
     end
 end
 
+local function cancelPendingClick()
+    -- Cancels only the "click a spot" pending selection mode.
+    local hadPending = (pendingMouseClickConnection ~= nil)
+
+    if pendingMouseClickConnection then
+        pendingMouseClickConnection:Disconnect()
+        pendingMouseClickConnection = nil
+    end
+
+    -- Optional cleanup hook (eg. clear highlights) for the current pending click mode.
+    local cleanup = pendingMouseClickCleanup
+    pendingMouseClickCleanup = nil
+    if cleanup then
+        hadPending = true
+        pcall(cleanup)
+    end
+
+    return hadPending
+end
+
+local function setPendingClick(conn, cleanupFn)
+    cancelPendingClick()
+    pendingMouseClickConnection = conn
+    pendingMouseClickCleanup = cleanupFn
+end
+
+local function hasActiveOrder()
+    -- If true, pressing C should do something meaningful.
+    return (pendingMouseClickConnection ~= nil) or (pendingMouseClickCleanup ~= nil) or (followConnection ~= nil) or isClicking or (moveTarget ~= nil)
+end
+
+local function cancelCurrentOrder(isFromCommander)
+    -- Stop any active movement/follow loops and close any pending click-to-target mode.
+    stopGotoWalk()
+    stopFollowing()
+    toggleClicking(false)
+
+    cancelPendingClick()
+
+    -- Also cancel any in-progress Humanoid MoveTo that might keep walking even after our loops stop.
+    local myChar = LocalPlayer.Character
+    local myHumanoid = myChar and myChar:FindFirstChildOfClass("Humanoid")
+    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if myHumanoid and myRoot then
+        pcall(function()
+            myHumanoid:Move(Vector3.new(0, 0, 0), false)
+            myHumanoid:MoveTo(myRoot.Position)
+        end)
+    end
+
+    -- If commander presses C, broadcast cancel to all soldiers via server command.
+    if isFromCommander then
+        sendCommand("cancel")
+    end
+end
+
 -- Helper functions must be defined before createPanel
 local function sendNotify(title, text)
     pcall(function()
@@ -99,7 +169,7 @@ local function sendNotify(title, text)
     end)
 end
 
-local function sendCommand(cmd)
+sendCommand = function(cmd)
     task.spawn(function()
         local request = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
         if request then
@@ -211,7 +281,7 @@ clearHighlights = function(highlights)
     end
 end
 
-local function stopGotoWalk()
+stopGotoWalk = function()
     gotoWalkToken = gotoWalkToken + 1
     if gotoConnection then
         gotoConnection:Disconnect()
@@ -231,6 +301,8 @@ local function startGotoWalk(targetPos)
         humanoid.Sit = false
         task.wait(0.1)
     end
+
+    moveTarget = targetPos
     
     local speed = 2 -- Upgraded speed
 
@@ -309,6 +381,8 @@ local function startGotoWalkMoveTo(targetPos)
         humanoid.Sit = false
         task.wait(0.1)
     end
+
+    moveTarget = targetPos
 
     -- Classic Roblox walking: keep calling MoveTo until we're close enough.
     local myToken = gotoWalkToken
@@ -394,6 +468,46 @@ end
 stopFollowingPosition = function()
     -- Removed
 end
+
+local function createHolographicCubes(position)
+    -- Clear existing cubes
+    for _, cube in ipairs(formationHoloCubes) do
+        if cube then cube:Destroy() end
+    end
+    formationHoloCubes = {}
+    
+    -- Create holographic cube (2 wide, 3 tall)
+    local cubeSize = Vector3.new(2, 3, 2)
+    local cube = Instance.new("Part")
+    cube.Size = cubeSize
+    cube.Position = position
+    cube.Anchored = true
+    cube.CanCollide = false
+    cube.Transparency = 0.7
+    cube.Color = Color3.fromRGB(0, 255, 255) -- Cyan
+    cube.Material = Enum.Material.Neon
+    cube.Parent = workspace
+    
+    table.insert(formationHoloCubes, cube)
+    
+    return cube
+end
+
+local function clearHolographicCubes()
+    for _, cube in ipairs(formationHoloCubes) do
+        if cube then cube:Destroy() end
+    end
+    formationHoloCubes = {}
+end
+
+local function updateHolographicCube(position)
+    if #formationHoloCubes > 0 and formationHoloCubes[1] then
+        formationHoloCubes[1].Position = position
+    else
+        createHolographicCubes(position)
+    end
+end
+
 
 local function terminateScript()
     isRunning = false
@@ -751,17 +865,15 @@ local function createPanel()
                 Color = Color3.fromRGB(100, 200, 255),
                 Callback = function()
                     sendNotify("Slide Mode", "Click where you want soldiers to slide")
-
-                    local clickConnection
-                    clickConnection = Mouse.Button1Down:Connect(function()
+                    setPendingClick(Mouse.Button1Down:Connect(function()
                         if Mouse.Hit then
                             local targetPos = Mouse.Hit.Position + Vector3.new(0, 3, 0)
                             local gotoCmd = string.format("goto %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
                             sendCommand(gotoCmd)
                             sendNotify("Slide", "Soldiers sliding to location")
-                            clickConnection:Disconnect()
+                            cancelPendingClick()
                         end
-                    end)
+                    end), nil)
 
                     -- Timeout removed per user request
                 end
@@ -771,17 +883,15 @@ local function createPanel()
                 Color = Color3.fromRGB(150, 255, 150),
                 Callback = function()
                     sendNotify("Walk Mode", "Click where you want soldiers to walk (MoveTo)")
-
-                    local clickConnection
-                    clickConnection = Mouse.Button1Down:Connect(function()
+                    setPendingClick(Mouse.Button1Down:Connect(function()
                         if Mouse.Hit then
                             local targetPos = Mouse.Hit.Position + Vector3.new(0, 3, 0)
                             local walkCmd = string.format("walkto %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
                             sendCommand(walkCmd)
                             sendNotify("WalkTo", "Soldiers walking to location")
-                            clickConnection:Disconnect()
+                            cancelPendingClick()
                         end
-                    end)
+                    end), nil)
                 end
             },
             {
@@ -789,17 +899,15 @@ local function createPanel()
                 Color = Color3.fromRGB(255, 120, 200),
                 Callback = function()
                     sendNotify("Force Goto", "Click where to teleport soldiers")
-                    
-                    local clickConnection
-                    clickConnection = Mouse.Button1Down:Connect(function()
+                    setPendingClick(Mouse.Button1Down:Connect(function()
                         if Mouse.Hit then
                             local targetPos = Mouse.Hit.Position
                             local forceGotoCmd = string.format("bring %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
                             sendCommand(forceGotoCmd)
                             sendNotify("Force Goto", "Teleporting soldiers")
-                            clickConnection:Disconnect()
+                            cancelPendingClick()
                         end
-                    end)
+                    end), nil)
                     
                     -- Timeout removed per user request
                 end
@@ -840,8 +948,7 @@ local function createPanel()
                     sendNotify("Follow Mode", "Click on a player to follow")
                     local highlights = highlightPlayers()
 
-                    local clickConnection
-                    clickConnection = Mouse.Button1Down:Connect(function()
+                    setPendingClick(Mouse.Button1Down:Connect(function()
                         local target = Mouse.Target
                         if target then
                             local character = target:FindFirstAncestorOfClass("Model")
@@ -854,12 +961,12 @@ local function createPanel()
 
                                     sendNotify("Following", player.Name .. " (" .. modeCmd .. ")")
                                     followTargetUserId = player.UserId
-
-                                    clearHighlights(highlights)
-                                    clickConnection:Disconnect()
+                                    cancelPendingClick()
                                 end
                             end
                         end
+                    end), function()
+                        clearHighlights(highlights)
                     end)
 
                     -- Timeout removed per user request
@@ -966,6 +1073,127 @@ local function createPanel()
             }
         }
     })
+
+    -- Formation Drawer
+    local formationDrawer = createDrawer({
+        Title = "Formation",
+        Description = "Organize soldiers in formations",
+        Icon = "📐",
+        Color = Color3.fromRGB(255, 150, 255),
+        Buttons = {
+            {
+                Text = "Mode: " .. formationMode,
+                Color = Color3.fromRGB(150, 100, 255),
+                Callback = function(btn)
+                    if formationMode == "Follow" then
+                        formationMode = "Goto"
+                    else
+                        formationMode = "Follow"
+                    end
+                    btn.Text = "Mode: " .. formationMode
+                    sendNotify("Formation", "Mode: " .. formationMode)
+                end
+            },
+            {
+                Text = "Shape: " .. formationShape,
+                Color = Color3.fromRGB(100, 200, 255),
+                Callback = function(btn)
+                    if formationShape == "Line" then
+                        formationShape = "Row"
+                    elseif formationShape == "Row" then
+                        formationShape = "Circle"
+                    else
+                        formationShape = "Line"
+                    end
+                    btn.Text = "Shape: " .. formationShape
+                    sendNotify("Formation", "Shape: " .. formationShape)
+                end
+            },
+            {
+                Text = "Follow Formation",
+                Color = Color3.fromRGB(100, 255, 150),
+                Callback = function()
+                    if formationMode == "Follow" then
+                        sendNotify("Follow Formation", "Click on a player to form around")
+                        local highlights = highlightPlayers()
+                        
+                        setPendingClick(Mouse.Button1Down:Connect(function()
+                            local target = Mouse.Target
+                            if target then
+                                local character = target:FindFirstAncestorOfClass("Model")
+                                if character then
+                                    local player = Players:GetPlayerFromCharacter(character)
+                                    if player and player ~= LocalPlayer then
+                                        local formationCmd = string.format("formation_follow %d %s", player.UserId, formationShape)
+                                        sendCommand(formationCmd)
+                                        sendNotify("Formation", "Following " .. player.Name .. " in " .. formationShape)
+                                        cancelPendingClick()
+                                    end
+                                end
+                            end
+                        end), function()
+                            clearHighlights(highlights)
+                        end)
+                    else
+                        sendNotify("Formation", "Switch to Follow mode first")
+                    end
+                end
+            },
+            {
+                Text = "Goto Formation",
+                Color = Color3.fromRGB(255, 200, 100),
+                Callback = function()
+                    if formationMode == "Goto" then
+                        sendNotify("Goto Formation", "Click where to place formation")
+                        
+                        -- Show holographic cube at mouse position
+                        local mouseMoveConn
+                        mouseMoveConn = RunService.RenderStepped:Connect(function()
+                            if Mouse.Hit then
+                                local targetPos = Mouse.Hit.Position + Vector3.new(0, 1.5, 0)
+                                updateHolographicCube(targetPos)
+                            end
+                        end)
+                        
+                        setPendingClick(Mouse.Button1Down:Connect(function()
+                            if Mouse.Hit then
+                                local targetPos = Mouse.Hit.Position + Vector3.new(0, 1.5, 0)
+                                local formationCmd = string.format("formation_goto %.2f,%.2f,%.2f %s", 
+                                    targetPos.X, targetPos.Y, targetPos.Z, formationShape)
+                                sendCommand(formationCmd)
+                                sendNotify("Formation", "Goto " .. formationShape .. " formation placed")
+                                
+                                if mouseMoveConn then
+                                    mouseMoveConn:Disconnect()
+                                end
+                                clearHolographicCubes()
+                                cancelPendingClick()
+                            end
+                        end), function()
+                            -- Cleanup: disconnect mouse move and clear cubes
+                            if mouseMoveConn then
+                                mouseMoveConn:Disconnect()
+                            end
+                            clearHolographicCubes()
+                        end)
+                    else
+                        sendNotify("Formation", "Switch to Goto mode first")
+                    end
+                end
+            },
+            {
+                Text = "Clear Formation",
+                Color = Color3.fromRGB(255, 100, 100),
+                Callback = function()
+                    sendCommand("formation_clear")
+                    clearHolographicCubes()
+                    sendNotify("Formation", "Formation cleared")
+                end
+            }
+        }
+    })
+    
+
     
     -- Initial State: Hidden
     panel.Position = UDim2.new(1, 0, 0.5, -240)
@@ -1007,6 +1235,25 @@ table.insert(connections, UserInputService.InputBegan:Connect(function(input, pr
                     panelGui.Enabled = false
                 end
             end)
+    end
+    elseif input.KeyCode == Enum.KeyCode.C then
+        local now = os.clock()
+        if now - lastCancelTime < CANCEL_COOLDOWN then
+            return
+        end
+
+        -- Don't let C be used to spam notifications when nothing is happening.
+        if not hasActiveOrder() then
+            return
+        end
+
+        lastCancelTime = now
+
+        if cancelPendingClick() then
+            sendNotify("Command", "Cancelled pending target selection")
+        else
+            cancelCurrentOrder(isCommander)
+            sendNotify("Command", "Cancelled current order")
         end
     elseif input.KeyCode == Enum.KeyCode.F3 then
         terminateScript()
@@ -1137,6 +1384,8 @@ while isRunning do
                                         print("[WALKTO] Target pos:", targetPos)
                                         startGotoWalkMoveTo(targetPos)
                                     end
+                                elseif action == "cancel" then
+                                    cancelCurrentOrder(false)
                                 elseif action == "jump" then
                                     if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
                                         LocalPlayer.Character.Humanoid.Jump = true
@@ -1161,6 +1410,77 @@ while isRunning do
                                     terminateScript()
                                     loadstring(game:HttpGet(RELOAD_URL .. "?t=" .. os.time()))()
                                     return -- Stop this thread
+                                elseif string.sub(action, 1, 17) == "formation_follow " then
+                                    -- Format: formation_follow <userId> <shape>
+                                    local args = string.split(string.sub(action, 18), " ")
+                                    if #args >= 2 then
+                                        formationLeaderId = tonumber(args[1])
+                                        formationShape = args[2]
+                                        formationMode = "Follow"
+                                        formationActive = true
+                                        
+                                        -- Start following in formation
+                                        if formationLeaderId then
+                                            startFollowing(formationLeaderId, formationShape)
+                                        end
+                                        
+                                        sendNotify("Formation", "Following in " .. formationShape)
+                                    end
+                                elseif string.sub(action, 1, 15) == "formation_goto " then
+                                    -- Format: formation_goto <x,y,z> <shape>
+                                    local parts = string.split(string.sub(action, 16), " ")
+                                    if #parts >= 2 then
+                                        local coords = string.split(parts[1], ",")
+                                        formationShape = parts[2]
+                                        formationMode = "Goto"
+                                        formationActive = true
+                                        
+                                        if #coords == 3 then
+                                            formationCenter = Vector3.new(
+                                                tonumber(coords[1]),
+                                                tonumber(coords[2]),
+                                                tonumber(coords[3])
+                                            )
+                                            
+                                            -- Calculate this client's position in formation
+                                            -- For now, use a simple offset based on client registration order
+                                            -- In a real implementation, server would assign specific indices
+                                            local myIndex = (LocalPlayer.UserId % 20) -- Simple index assignment
+                                            local targetPos = formationCenter
+                                            
+                                            if formationShape == "Line" then
+                                                targetPos = formationCenter + Vector3.new((myIndex - 10) * 4, 0, 0)
+                                            elseif formationShape == "Row" then
+                                                local row = math.floor(myIndex / 3)
+                                                local col = myIndex % 3
+                                                targetPos = formationCenter + Vector3.new((col - 1) * 4, 0, row * 4)
+                                            elseif formationShape == "Circle" then
+                                                local angle = (myIndex / 20) * math.pi * 2
+                                                local radius = 15
+                                                targetPos = formationCenter + Vector3.new(
+                                                    math.cos(angle) * radius,
+                                                    0,
+                                                    math.sin(angle) * radius
+                                                )
+                                            end
+                                            
+                                            -- Move to position once
+                                            stopFollowing()
+                                            startGotoWalk(targetPos)
+                                            
+                                            sendNotify("Formation", "Moving to " .. formationShape .. " position")
+                                        end
+                                    end
+                                elseif action == "formation_clear" then
+                                    formationActive = false
+                                    formationMode = "Follow"
+                                    formationShape = "Line"
+                                    formationLeaderId = nil
+                                    formationCenter = nil
+                                    stopFollowing()
+                                    stopGotoWalk()
+                                    clearHolographicCubes()
+                                    sendNotify("Formation", "Formation cleared")
                                 elseif action == "rejoin" then
                                     game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
                                 end
