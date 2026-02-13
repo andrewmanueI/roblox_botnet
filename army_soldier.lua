@@ -39,7 +39,38 @@ local moveTarget = nil
 local VirtualUser = game:GetService("VirtualUser")
 local gotoDummy = nil
 local gotoDummyConnection = nil
-local autoJumpEnabled = true
+local autoJumpEnabled = false
+local gotoWalkToken = 0 -- increments to cancel any active goto walk loop
+local debugFollowCommands = false -- When true, commander will also execute server commands.
+
+-- Background autojump loop: runs continuously and checks `autoJumpEnabled`.
+-- Mimics IY's `autojump`: cast two short rays forward; if either hits, trigger a jump.
+task.spawn(function()
+    local rs = RunService.RenderStepped
+    while isRunning do
+        rs:Wait()
+
+        if autoJumpEnabled then
+            local char = LocalPlayer.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 and hum.Parent and not hum.SeatPart then
+                local root = hum.RootPart or (char and char:FindFirstChild("HumanoidRootPart"))
+                if root then
+                    local dir = root.CFrame.LookVector * 3
+                    local origin1 = root.Position - Vector3.new(0, 1.5, 0)
+                    local origin2 = root.Position + Vector3.new(0, 1.5, 0)
+
+                    -- Ignore your own character (hum.Parent) so we don't "hit our leg".
+                    local check1 = workspace:FindPartOnRay(Ray.new(origin1, dir), hum.Parent)
+                    local check2 = workspace:FindPartOnRay(Ray.new(origin2, dir), hum.Parent)
+                    if check1 or check2 then
+                        hum.Jump = true
+                    end
+                end
+            end
+        end
+    end
+end)
 
 local function toggleClicking(state)
     isClicking = state
@@ -55,21 +86,6 @@ local function toggleClicking(state)
             end
         end)
     end
-end
-
--- Voodoo ByteNet logic
-local function fireVoodoo(targetPos)
-    local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
-    if not ByteNetRemote then return end
-    
-    local b = buffer.create(14)
-    buffer.writeu8(b, 0, 0)   -- Namespace 0
-    buffer.writeu8(b, 1, 10)  -- Packet ID 10
-    buffer.writef32(b, 2, targetPos.X)
-    buffer.writef32(b, 6, targetPos.Y)
-    buffer.writef32(b, 10, targetPos.Z)
-    
-    ByteNetRemote:FireServer(b)
 end
 
 -- Helper functions must be defined before createPanel
@@ -173,7 +189,7 @@ local function acknowledgeCommand(commandId, success, errorMsg)
     return ackSuccess
 end
 
-local function highlightPlayers()
+highlightPlayers = function()
     local highlights = {}
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
@@ -189,13 +205,14 @@ local function highlightPlayers()
     return highlights
 end
 
-local function clearHighlights(highlights)
+clearHighlights = function(highlights)
     for _, h in ipairs(highlights) do
         if h then h:Destroy() end
     end
 end
 
 local function stopGotoWalk()
+    gotoWalkToken = gotoWalkToken + 1
     if gotoConnection then
         gotoConnection:Disconnect()
         gotoConnection = nil
@@ -216,27 +233,113 @@ local function startGotoWalk(targetPos)
     end
     
     local speed = 2 -- Upgraded speed
-    
-    gotoConnection = RunService.Heartbeat:Connect(function(delta)
-        local myChar = LocalPlayer.Character
-        local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-        if not myRoot then return end
 
-        local dist = (targetPos - myRoot.Position).Magnitude
-        if dist < 1.5 then
-            stopGotoWalk()
-            return
+    -- Mirror the proven working logic in `test_walk.lua`: Heartbeat:Wait() + TranslateBy.
+    -- This is also more robust than relying on the Heartbeat Connect(dt) arg existing.
+    local myToken = gotoWalkToken
+    task.spawn(function()
+        local lastPos = nil
+        local stuckTime = 0
+        while isRunning and myToken == gotoWalkToken do
+            local delta = RunService.Heartbeat:Wait()
+
+            local myChar = LocalPlayer.Character
+            local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+            local myHumanoid = myChar and myChar:FindFirstChildOfClass("Humanoid")
+
+            if not (myChar and myRoot and myHumanoid) then
+                lastPos = nil
+                stuckTime = 0
+            else
+                -- If something seats us mid-walk, unseat so movement can resume.
+                if myHumanoid.SeatPart then
+                    myHumanoid.Sit = false
+                end
+
+                local offset = (targetPos - myRoot.Position)
+                local dist = offset.Magnitude
+                if dist < 1.5 then
+                    stopGotoWalk()
+                    break
+                end
+
+                if dist > 1e-6 then
+                    local direction = offset.Unit
+
+                    -- Primary: tp-walk style TranslateBy
+                    local ok, err = pcall(function()
+                        myChar:TranslateBy(direction * speed * delta * 10)
+                    end)
+                    if not ok then
+                        warn("[GOTO] TranslateBy error:", err)
+                    end
+
+                    -- Detect "stuck" (position not changing) and fall back to Humanoid MoveTo.
+                    if lastPos then
+                        local moved = (myRoot.Position - lastPos).Magnitude
+                        if moved < 0.01 then
+                            stuckTime = stuckTime + delta
+                        else
+                            stuckTime = 0
+                        end
+                    end
+                    lastPos = myRoot.Position
+
+                    if stuckTime > 0.35 then
+                        -- Fallback movement that works in more games/executors.
+                        pcall(function()
+                            myHumanoid:MoveTo(targetPos)
+                            myHumanoid:Move(direction, false)
+                        end)
+                    end
+                end
+            end
         end
-
-        local direction = (targetPos - myRoot.Position).Unit
-        -- Rotate to face destination
-        myRoot.CFrame = CFrame.new(myRoot.Position, Vector3.new(targetPos.X, myRoot.Position.Y, targetPos.Z))
-        -- Inch towards target
-        myChar:TranslateBy(direction * speed * delta * 10)
     end)
 end
 
-local function startFollowing(userId, mode)
+local function startGotoWalkMoveTo(targetPos)
+    stopGotoWalk()
+    stopFollowing()
+
+    local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    local humanoid = char:WaitForChild("Humanoid")
+
+    if humanoid.SeatPart then
+        humanoid.Sit = false
+        task.wait(0.1)
+    end
+
+    -- Classic Roblox walking: keep calling MoveTo until we're close enough.
+    local myToken = gotoWalkToken
+    task.spawn(function()
+        local lastMoveTo = 0
+        while isRunning and myToken == gotoWalkToken do
+            RunService.Heartbeat:Wait()
+
+            local myChar = LocalPlayer.Character
+            local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+            local myHumanoid = myChar and myChar:FindFirstChildOfClass("Humanoid")
+            if myRoot and myHumanoid then
+                local dist = (targetPos - myRoot.Position).Magnitude
+                if dist < 1.5 then
+                    stopGotoWalk()
+                    break
+                end
+
+                -- Some games need MoveTo refreshed periodically.
+                if os.clock() - lastMoveTo > 0.2 then
+                    lastMoveTo = os.clock()
+                    pcall(function()
+                        myHumanoid:MoveTo(targetPos)
+                    end)
+                end
+            end
+        end
+    end)
+end
+
+startFollowing = function(userId, mode)
     if followConnection then
         followConnection:Disconnect()
     end
@@ -280,7 +383,7 @@ local function startFollowing(userId, mode)
     end)
 end
 
-local function stopFollowing()
+stopFollowing = function()
     if followConnection then
         followConnection:Disconnect()
         followConnection = nil
@@ -288,7 +391,7 @@ local function stopFollowing()
     followTargetUserId = nil
 end
 
-local function stopFollowingPosition()
+stopFollowingPosition = function()
     -- Removed
 end
 
@@ -644,29 +747,38 @@ local function createPanel()
                 end
             },
             {
-                Text = "Goto Mouse (Walk)",
+                Text = "Goto Mouse (Slide)",
                 Color = Color3.fromRGB(100, 200, 255),
                 Callback = function()
-                    local LocalPlayer = game:GetService("Players").LocalPlayer
-                    local Mouse = LocalPlayer:GetMouse()
-                    
-                    sendNotify("Goto Mode", "Click on ground to walk")
+                    sendNotify("Slide Mode", "Click where you want soldiers to slide")
 
                     local clickConnection
                     clickConnection = Mouse.Button1Down:Connect(function()
-                        local currentMouse = LocalPlayer:GetMouse() -- Redefine again inside
-                        if currentMouse.Hit then
-                            local targetPos = currentMouse.Hit.Position + Vector3.new(0, 3, 0)
+                        if Mouse.Hit then
+                            local targetPos = Mouse.Hit.Position + Vector3.new(0, 3, 0)
                             local gotoCmd = string.format("goto %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
-                            
-                            -- LOCAL EXECUTION for Commander (Reason check)
-                            if isCommander then
-                                print("[GOTO] Commander local execution to:", targetPos)
-                                startGotoWalk(targetPos)
-                            end
-
                             sendCommand(gotoCmd)
-                            sendNotify("Goto Executed", "Army walking...")
+                            sendNotify("Slide", "Soldiers sliding to location")
+                            clickConnection:Disconnect()
+                        end
+                    end)
+
+                    -- Timeout removed per user request
+                end
+            },
+            {
+                Text = "Goto Mouse (Walk)",
+                Color = Color3.fromRGB(150, 255, 150),
+                Callback = function()
+                    sendNotify("Walk Mode", "Click where you want soldiers to walk (MoveTo)")
+
+                    local clickConnection
+                    clickConnection = Mouse.Button1Down:Connect(function()
+                        if Mouse.Hit then
+                            local targetPos = Mouse.Hit.Position + Vector3.new(0, 3, 0)
+                            local walkCmd = string.format("walkto %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
+                            sendCommand(walkCmd)
+                            sendNotify("WalkTo", "Soldiers walking to location")
                             clickConnection:Disconnect()
                         end
                     end)
@@ -841,6 +953,16 @@ local function createPanel()
                     sendCommand("set_autojump " .. tostring(autoJumpEnabled))
                     sendNotify("Settings", "Autojump " .. (autoJumpEnabled and "enabled" or "disabled"))
                 end
+            },
+            {
+                Text = "Debug Follow: " .. (debugFollowCommands and "ON" or "OFF"),
+                Color = debugFollowCommands and Color3.fromRGB(100, 255, 150) or Color3.fromRGB(255, 100, 100),
+                Callback = function(btn)
+                    debugFollowCommands = not debugFollowCommands
+                    btn.Text = "Debug Follow: " .. (debugFollowCommands and "ON" or "OFF")
+                    btn.TextColor3 = debugFollowCommands and Color3.fromRGB(100, 255, 150) or Color3.fromRGB(255, 100, 100)
+                    sendNotify("Settings", "Debug Follow " .. (debugFollowCommands and "enabled" or "disabled"))
+                end
             }
         }
     })
@@ -969,10 +1091,18 @@ while isRunning do
                     currentPollRate = MIN_POLL_RATE
 
                     task.spawn(function()
-                        if action ~= "wait" then
+                        -- By default, the commander does NOT obey server-issued commands.
+                        -- Enable `debugFollowCommands` if you want the commander to follow commands too.
+                        local shouldExecute = (action ~= "wait") and (not isCommander or debugFollowCommands)
+                        if shouldExecute then
                             sendNotify("New Order", action)
 
                             local execResult, execError = pcall(function()
+                                -- If a tp-walk goto loop is running, it will continuously TranslateBy and can
+                                -- effectively "override" other movement commands. Cancel it for non-goto actions.
+                                if string.sub(action, 1, 4) ~= "goto" then
+                                    stopGotoWalk()
+                                end
                                 if string.sub(action, 1, 5) == "bring" then
                                     stopFollowing()
                                     local coords = string.split(string.sub(action, 7), ",") -- Fixed index
@@ -996,6 +1126,16 @@ while isRunning do
                                         local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
                                         print("[GOTO] Target pos:", targetPos)
                                         startGotoWalk(targetPos)
+                                    end
+                                elseif string.sub(action, 1, 6) == "walkto" then
+                                    print("[WALKTO] Received command:", action)
+                                    stopFollowing()
+                                    local coords = string.split(string.sub(action, 8), ",") -- after "walkto "
+                                    print("[WALKTO] Coords:", coords[1], coords[2], coords[3])
+                                    if #coords == 3 then
+                                        local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
+                                        print("[WALKTO] Target pos:", targetPos)
+                                        startGotoWalkMoveTo(targetPos)
                                     end
                                 elseif action == "jump" then
                                     if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
@@ -1023,14 +1163,16 @@ while isRunning do
                                     return -- Stop this thread
                                 elseif action == "rejoin" then
                                     game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
-                                elseif string.sub(action, 1, 6) == "voodoo" then
-                                    local coords = string.split(string.sub(action, 8), ",")
-                                    if #coords == 3 then
-                                        fireVoodoo(Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3])))
-                                    end
                                 end
                             end)
+                            if not execResult then
+                                warn("[ARMY] Command failed:", action, execError)
+                            end
                             acknowledgeCommand(commandId, execResult, execError)
+                        else
+                            -- Commander is ignoring server orders (or it's a wait/no-op).
+                            -- Still ACK so the server doesn't keep replaying the same command forever.
+                            acknowledgeCommand(commandId, true, nil)
                         end
                     end)
                 end

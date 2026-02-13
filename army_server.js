@@ -52,8 +52,8 @@ const updateCommand = (action, source) => {
     const isImpulse = command.type === 'impulse';
     if (isImpulse) {
         const currentId = latestCommand.id;
-        // All impulses now clear in 0.5s
-        const timeout = 500;
+        // All impulses now clear in 1s
+        const timeout = 1000;
         console.log(`[TIMER] Impulse detected. Clearing in ${timeout}ms: ${action}`);
         impulseTimer = setTimeout(() => {
             if (latestCommand.id === currentId) {
