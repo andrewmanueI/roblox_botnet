@@ -7,7 +7,8 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 -- Forward declarations
-local highlightPlayers, clearHighlights, startFollowing, stopFollowing, startFollowingPosition, stopFollowingPosition, sendCommand, stopGotoWalk, stopFarming, stopRoute, showRouteManager, startRouteExecution, fetchRoutes, syncSaveRoute, syncDeleteRoute
+-- Forward declarations
+local highlightPlayers, clearHighlights, startFollowing, stopFollowing, startFollowingPosition, stopFollowingPosition, sendCommand, stopGotoWalk, stopFarming, stopRoute, showRouteManager, startRouteExecution, fetchRoutes, syncSaveRoute, syncDeleteRoute, walkToUntilWithin, startFarmingTarget
 local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
 
@@ -1246,7 +1247,7 @@ local function dropItemByName(itemName, quantity)
     print("[DROP] Dropped " .. dropped .. "x " .. itemName)
 end
 
-local function walkToUntilWithin(targetPos, stopDistance)
+walkToUntilWithin = function(targetPos, stopDistance)
     -- Returns true if we actually reached the stopDistance, false if cancelled/aborted.
     stopDistance = tonumber(stopDistance) or 6
     local STOP_TOLERANCE = 0.1 -- studs; allow minor overshoot/latency before considering it "reached"
@@ -2134,7 +2135,7 @@ local function showPickupManager()
     refreshWhitelist()
 end
 
-local function startFarmingTarget(targetPos)
+startFarmingTarget = function(targetPos)
     stopFarming()
     local myToken = farmToken
     

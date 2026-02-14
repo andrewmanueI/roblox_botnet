@@ -200,7 +200,7 @@ console.log("Listening on Port: 5555");
 
 const server = http.createServer((req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
 
     if (req.method === 'OPTIONS') {
         res.writeHead(204);
@@ -630,6 +630,30 @@ const server = http.createServer((req, res) => {
         }
 
         // Route delete endpoint
+        if (req.url.startsWith('/routes/')) {
+            const routeName = decodeURIComponent(req.url.slice(8));
+            if (serverConfigs.routes[routeName]) {
+                delete serverConfigs.routes[routeName];
+                saveConfig();
+                console.log(`[ROUTES] Deleted route: ${routeName}`);
+                res.writeHead(200);
+                res.end('Route Deleted');
+            } else {
+                res.writeHead(404);
+                res.end('Route not found');
+            }
+            return;
+        }
+
+        res.writeHead(404);
+        res.end('Not Found');
+        return;
+    }
+
+    // Route delete endpoint (preferred REST method).
+    // The client calls this with HTTP DELETE: `/routes/<name>`.
+    // Keep POST-delete above for backward-compat with older clients.
+    if (req.method === 'DELETE') {
         if (req.url.startsWith('/routes/')) {
             const routeName = decodeURIComponent(req.url.slice(8));
             if (serverConfigs.routes[routeName]) {
