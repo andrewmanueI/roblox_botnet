@@ -490,11 +490,11 @@ local function firePickup(item)
     local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
     if not ByteNetRemote then return end
 
-    -- Create 6-byte buffer: [0][packetID][u32(entityID)]
-    local b = buffer.create(6)
-    buffer.writeu8(b, 0, ByteNetMap.Namespace)
-    buffer.writeu8(b, 1, ByteNetMap.Pickup)
-    buffer.writeu32(b, 2, entityID)
+    -- Create 5-byte buffer: [packetID][u32(entityID)]
+    -- Note: Pickup typically omits the Namespace byte
+    local b = buffer.create(5)
+    buffer.writeu8(b, 0, ByteNetMap.Pickup)
+    buffer.writeu32(b, 1, entityID)
     
     ByteNetRemote:FireServer(b)
 end
