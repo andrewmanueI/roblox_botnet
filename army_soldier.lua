@@ -46,8 +46,9 @@ local autoJumpEnabled = false
 local autoJumpForceCount = 0 -- temporary override while slide/walk movement is active
 
 local function isAutoJumpActive()
-    return autoJumpEnabled or (autoJumpForceCount > 0)
+    return autoJumpEnabled or (autoJumpForceCount > 0) or (followConnection ~= nil)
 end
+
 
 -- JSON / server data sometimes turns booleans into strings ("false"/"true").
 -- In Luau, any non-nil string is truthy, so we must coerce explicitly.
@@ -189,6 +190,19 @@ task.spawn(function()
         end
     end
 end)
+
+-- Persistent WalkSpeed enforcement: keep it at 16.
+task.spawn(function()
+    while isRunning do
+        task.wait(0.5)
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum and hum.WalkSpeed ~= 16 then
+            hum.WalkSpeed = 16
+        end
+    end
+end)
+
 
 local function toggleClicking(state)
     isClicking = state
@@ -1531,14 +1545,24 @@ local function fireAction(actionId, entityId)
     local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
     if not ByteNetRemote then return end
     
-    -- Create 6-byte buffer: [0][packetID][u32(entityID)]
-    local b = buffer.create(6)
-    buffer.writeu8(b, 0, 0)   -- Namespace 0
-    buffer.writeu8(b, 1, actionId) -- Packet ID (e.g. 17 for Hit)
-    buffer.writeu32(b, 2, entityId) -- Target Entity ID
-    
-    ByteNetRemote:FireServer(b)
+    if actionId == 17 then
+        -- Packet 17 (SwingTool) structure: [0][17][count_u16][entityId_u32]
+        local b = buffer.create(8)
+        buffer.writeu8(b, 0, 0)   -- Namespace 0
+        buffer.writeu8(b, 1, 17)  -- Packet ID 17
+        buffer.writeu16(b, 2, 1)  -- Count (1 target)
+        buffer.writeu32(b, 4, entityId) -- Target Entity ID
+        ByteNetRemote:FireServer(b)
+    else
+        -- Default 6-byte structure for other simple actions
+        local b = buffer.create(6)
+        buffer.writeu8(b, 0, 0)
+        buffer.writeu8(b, 1, actionId)
+        buffer.writeu32(b, 2, entityId)
+        ByteNetRemote:FireServer(b)
+    end
 end
+
 
 
 local function getInventoryReport(query)
@@ -4255,6 +4279,59 @@ local function createPanel()
                 end
             },
             {
+                Text = "Follow Commander",
+                Color = Color3.fromRGB(150, 255, 150),
+                Callback = function()
+                    formationMode = "Follow"
+                    sendNotify("Formation", "Calculating offsets for Commander follow...")
+                    
+                    task.spawn(function()
+                        if networkRequest then
+                            local success, response = robustRequest({
+                                Url = SERVER_URL .. "/clients",
+                                Method = "GET"
+                            })
+                            
+                            if success and response and response.Body then
+                                local jsonSuccess, data = pcall(function()
+                                    return HttpService:JSONDecode(response.Body)
+                                end)
+                                if jsonSuccess and data then
+                                    local soldiers = {}
+                                    for _, client in ipairs(data) do
+                                        if not client.isCommander then
+                                            table.insert(soldiers, client)
+                                        end
+                                    end
+                                    
+                                    local count = #soldiers
+                                    local offsets = calculateFormationOffsets(formationShape, count)
+                                    local offsetsData = {}
+                                    for i, soldier in ipairs(soldiers) do
+                                        if offsets[i] then
+                                            offsetsData[soldier.id] = {
+                                                x = offsets[i].X,
+                                                y = offsets[i].Y,
+                                                z = offsets[i].Z
+                                            }
+                                        end
+                                    end
+                                    
+                                    local offsetsJson = HttpService:JSONEncode(offsetsData)
+                                    local formationCmd = string.format("formation_follow %d %s %s", LocalPlayer.UserId, formationShape, offsetsJson)
+                                    sendCommand(formationCmd)
+                                    
+                                    sendNotify("Formation", "Soldiers are forming around Commander (" .. formationShape .. ")")
+                                end
+                            else
+                                sendNotify("Error", "Could not fetch soldiers from server")
+                            end
+                        end
+                    end)
+                end
+            },
+
+            {
                 Text = "Goto Formation",
                 Color = Color3.fromRGB(255, 200, 100),
                 Callback = function()
@@ -4928,9 +5005,25 @@ while isRunning do
                                 elseif action == "spawn" then
                                     task.spawn(function()
                                         local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
-                                        local playButton = playerGui and playerGui:FindFirstChild("SpawnGui", true) 
-                                            and playerGui.SpawnGui:FindFirstChild("Customization", true)
-                                            and playerGui.SpawnGui.Customization:FindFirstChild("PlayButton", true)
+                                        if not playerGui then return end
+                                        
+                                        local function findPlayButton()
+                                            -- Look for SpawnGui first
+                                            local spawnGui = playerGui:FindFirstChild("SpawnGui", true)
+                                            if spawnGui then
+                                                return spawnGui:FindFirstChild("PlayButton", true) or spawnGui:FindFirstChild("Play", true)
+                                            end
+                                            -- Fallback: Search all of PlayerGui for a PlayButton
+                                            return playerGui:FindFirstChild("PlayButton", true) or playerGui:FindFirstChild("Play", true)
+                                        end
+
+                                        local playButton = findPlayButton()
+                                        
+                                        -- Retry once after a small delay if not found (UI might be loading)
+                                        if not playButton then
+                                            task.wait(0.5)
+                                            playButton = findPlayButton()
+                                        end
                                         
                                         if playButton and playButton:IsA("TextButton") then
                                             if firesignal then
@@ -4938,11 +5031,12 @@ while isRunning do
                                                 firesignal(playButton.Activated)
                                             end
                                             pcall(function() playButton:Activate() end)
-                                            sendNotify("Army", "Spawn button clicked")
+                                            sendNotify("Army", "Spawn button triggered")
                                         else
                                             sendNotify("Army", "Spawn button not found")
                                         end
                                     end)
+
                                 end
                             end)
                             if not execResult then
