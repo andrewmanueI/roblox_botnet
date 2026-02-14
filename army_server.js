@@ -114,14 +114,18 @@ const calculateFormationPositions = (shape, count, center = { x: 0, y: 0, z: 0 }
 };
 
 const assignFormationPositions = () => {
-    const clientList = Array.from(clients.keys());
+    // Filter out commanders from the list of clients for formation
+    const clientList = Array.from(clients.values())
+        .filter(client => !client.isCommander)
+        .map(client => client.id);
+    
     formationState.assignments.clear();
     
     clientList.forEach((clientId, index) => {
         formationState.assignments.set(clientId, index);
     });
     
-    console.log(`[FORMATION] Assigned ${clientList.length} clients to formation positions`);
+    console.log(`[FORMATION] Assigned ${clientList.length} soldiers to formation positions`);
 };
 
 const generateClientId = () => {
@@ -226,9 +230,10 @@ const server = http.createServer((req, res) => {
                 registeredAt: Date.now(),
                 lastSeen: Date.now(),
                 lastCommandId: 0,
-                executedCommands: new Set()
+                executedCommands: new Set(),
+                isCommander: !!data.isCommander
             });
-            console.log(`[REGISTER] New client: ${clientId}`);
+            console.log(`[REGISTER] New client: ${clientId} (Commander: ${!!data.isCommander})`);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ clientId }));
         });
@@ -245,6 +250,7 @@ const server = http.createServer((req, res) => {
                     registeredAt: client.registeredAt,
                     lastSeen: client.lastSeen,
                     lastCommandId: client.lastCommandId,
+                    isCommander: client.isCommander
                 });
             }
             res.writeHead(200, { 'Content-Type': 'application/json' });

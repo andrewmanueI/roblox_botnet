@@ -472,7 +472,8 @@ local function registerClient()
     if not networkRequest then return false end
 
     local body = HttpService:JSONEncode({
-        name = LocalPlayer.Name
+        name = LocalPlayer.Name,
+        isCommander = isCommander
     })
 
     local success, response = robustRequest({
@@ -4158,8 +4159,15 @@ local function createPanel()
                                         return HttpService:JSONDecode(response.Body)
                                     end)
                                     if jsonSuccess and data then
-                                        clientCount = #data
+                                        -- Filter out commanders from formation
+                                        local soldiers = {}
                                         for _, client in ipairs(data) do
+                                            if not client.isCommander then
+                                                table.insert(soldiers, client)
+                                            end
+                                        end
+                                        clientCount = #soldiers
+                                        for _, client in ipairs(soldiers) do
                                             table.insert(clientIds, client.id)
                                         end
                                     end
@@ -4257,9 +4265,16 @@ local function createPanel()
                                 end)
                                 
                                 if jsonSuccess and data then
-                                    clientCount = #data
-                                    -- Extract client IDs
+                                    -- Filter out commanders from formation
+                                    local soldiers = {}
                                     for _, client in ipairs(data) do
+                                        if not client.isCommander then
+                                            table.insert(soldiers, client)
+                                        end
+                                    end
+                                    clientCount = #soldiers
+                                    -- Extract client IDs
+                                    for _, client in ipairs(soldiers) do
                                         table.insert(clientIds, client.id)
                                     end
                                     sendNotify("Formation", "Showing formation for " .. clientCount .. " clients")
@@ -4447,10 +4462,16 @@ table.insert(connections, UserInputService.InputBegan:Connect(function(input, pr
     if processed then return end
     
     if input.KeyCode == Enum.KeyCode.G then
+        local wasCommander = isCommander
         isCommander = true
         
         if not panelGui then
             panelGui = createPanel()
+        end
+        
+        -- Re-register if we just became commander so the server knows
+        if not wasCommander then
+            task.spawn(registerClient)
         end
         
         local panel = panelGui:FindFirstChild("MainPanel")
