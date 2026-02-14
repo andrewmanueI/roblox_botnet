@@ -8,7 +8,9 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 -- Forward declarations
 -- Forward declarations
-local highlightPlayers, clearHighlights, startFollowing, stopFollowing, startFollowingPosition, stopFollowingPosition, sendCommand, stopGotoWalk, stopFarming, stopRoute, showRouteManager, startRouteExecution, fetchRoutes, syncSaveRoute, syncDeleteRoute, walkToUntilWithin, startFarmingTarget
+local highlightPlayers, clearHighlights, startFollowing, stopFollowing, startFollowingPosition, stopFollowingPosition, sendCommand, stopGotoWalk, stopFarming, stopRoute, showRouteManager, startRouteExecution, fetchRoutes, syncSaveRoute, syncDeleteRoute, walkToUntilWithin, startFarmingTarget, startPrepareTool, stopPrepare
+-- Used before their definitions below; forward-declare to avoid global/nil lookups.
+local getMyRig, fireEquip, fireInventoryUse
 local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
 
@@ -45,6 +47,31 @@ local autoJumpForceCount = 0 -- temporary override while slide/walk movement is 
 
 local function isAutoJumpActive()
     return autoJumpEnabled or (autoJumpForceCount > 0)
+end
+
+-- JSON / server data sometimes turns booleans into strings ("false"/"true").
+-- In Luau, any non-nil string is truthy, so we must coerce explicitly.
+local function coerceBool(v, defaultValue)
+    if v == nil then
+        return defaultValue == true
+    end
+    if v == true or v == false then
+        return v
+    end
+    local tv = type(v)
+    if tv == "number" then
+        return v ~= 0
+    end
+    if tv == "string" then
+        local s = string.lower(v)
+        if s == "true" or s == "1" or s == "yes" or s == "on" then
+            return true
+        end
+        if s == "false" or s == "0" or s == "no" or s == "off" or s == "" then
+            return false
+        end
+    end
+    return defaultValue == true
 end
 
 local function beginForceAutoJump()
@@ -93,7 +120,15 @@ local formationLeaderId = nil
 local formationOffsets = nil -- Map of userId -> {x, y, z} relative offsets
 local farmToken = 0
 local routeToken = 0
+local routePrevAutoJump = nil -- restore user's setting after route ends/cancels
+local prepareToken = 0
+local isPreparing = false
+local isFarming = false
+local isRouteRunning = false
 local savedRoutes = {} -- Map of name -> {waypoints = {{pos={x,y,z}, autoJump=bool}, ...}}
+local infJumpEnabled = true
+local infJumpConnection = nil
+local infJumpDebounce = false
 
 
 -- Centralized Network Request Helper
@@ -199,7 +234,8 @@ end
 
 local function hasActiveOrder()
     -- If true, pressing C should do something meaningful.
-    return (pendingMouseClickConnection ~= nil) or (pendingMouseClickCleanup ~= nil) or (followConnection ~= nil) or isClicking or (moveTarget ~= nil)
+    -- "C" should NOT cancel preparing once it's running (per user request)
+    return (pendingMouseClickConnection ~= nil) or (pendingMouseClickCleanup ~= nil) or (followConnection ~= nil) or isClicking or (moveTarget ~= nil) or isFarming or isRouteRunning
 end
 
 local function cancelCurrentOrder(isFromCommander)
@@ -211,6 +247,7 @@ local function cancelCurrentOrder(isFromCommander)
     cancelPendingClick()
     stopFarming()
     stopRoute()
+    -- stopPrepare() is now handled by the "Finish Preparing" button or F3, not "C" while running.
 
     -- Also cancel any in-progress Humanoid MoveTo that might keep walking even after our loops stop.
     local myChar = LocalPlayer.Character
@@ -357,7 +394,16 @@ end
 
 local function firePickup(item)
     if not item then return end
+    -- Items can be BaseParts or Models depending on the game.
     local entityID = item:GetAttribute("EntityID")
+    if not entityID and item:IsA("Model") then
+        local pp = item.PrimaryPart
+        entityID = (pp and pp:GetAttribute("EntityID")) or nil
+        if not entityID then
+            local anyPart = item:FindFirstChildWhichIsA("BasePart", true)
+            entityID = anyPart and anyPart:GetAttribute("EntityID") or nil
+        end
+    end
     if not entityID then return end
 
     local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
@@ -529,38 +575,71 @@ end
 
 stopFarming = function()
     farmToken = farmToken + 1
+    isFarming = false
     stopGotoWalk()
 end
 
 stopRoute = function()
     routeToken = routeToken + 1
+    isRouteRunning = false
     stopGotoWalk()
+    if routePrevAutoJump ~= nil then
+        autoJumpEnabled = routePrevAutoJump
+        routePrevAutoJump = nil
+    end
 end
 
 startRouteExecution = function(waypoints)
     stopRoute()
     local myToken = routeToken
+    isRouteRunning = true
+    routePrevAutoJump = autoJumpEnabled
     
     task.spawn(function()
         sendNotify("Route", "Starting route execution (" .. #waypoints .. " points)")
+        local aborted = false
         for i, wp in ipairs(waypoints) do
-            if not isRunning or myToken ~= routeToken then break end
+            if not isRunning or myToken ~= routeToken then 
+                isRouteRunning = false
+                break 
+            end
             
             -- Apply AutoJump setting for this leg of the journey
-            autoJumpEnabled = wp.autoJump
+            autoJumpEnabled = coerceBool(wp.autoJump, true)
             
-            local targetPos = Vector3.new(wp.pos.x, wp.pos.y, wp.pos.z)
+            local px = wp.pos and tonumber(wp.pos.x) or nil
+            local py = wp.pos and tonumber(wp.pos.y) or nil
+            local pz = wp.pos and tonumber(wp.pos.z) or nil
+            if not (px and py and pz) then
+                sendNotify("Route", "Route aborted - invalid waypoint data at point " .. i)
+                isRouteRunning = false
+                aborted = true
+                break
+            end
+
+            local targetPos = Vector3.new(px, py, pz)
             print("[ROUTE] Moving to point " .. i .. "/" .. #waypoints .. " @ " .. tostring(targetPos) .. " (AutoJump: " .. tostring(autoJumpEnabled) .. ")")
             
-            local reached = walkToUntilWithin(targetPos, 6)
+            -- Route waypoints can disable jump. Don't force auto-jump during route legs;
+            -- rely on `autoJumpEnabled = wp.autoJump` above.
+            local reached = walkToUntilWithin(targetPos, 6, { forceAutoJump = false })
             if not reached then
                 sendNotify("Route", "Route aborted - blocked at point " .. i)
+                isRouteRunning = false
+                aborted = true
                 break
             end
         end
         
         if myToken == routeToken then
-            sendNotify("Route", "Route completed")
+            isRouteRunning = false
+            if routePrevAutoJump ~= nil then
+                autoJumpEnabled = routePrevAutoJump
+                routePrevAutoJump = nil
+            end
+            if not aborted then
+                sendNotify("Route", "Route completed")
+            end
         end
     end)
 end
@@ -600,6 +679,205 @@ syncDeleteRoute = function(name)
     })
 end
 
+local function hasToolInInventory(targetName)
+    targetName = targetName:lower()
+
+    -- Prefer real instances if they exist (works even when UI panels are closed).
+    local char = LocalPlayer.Character
+    if char then
+        for _, inst in ipairs(char:GetChildren()) do
+            if inst:IsA("Tool") and inst.Name:lower():find(targetName, 1, true) then
+                return true
+            end
+        end
+    end
+    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack") or (LocalPlayer:FindFirstChild("Backpack"))
+    if backpack then
+        for _, inst in ipairs(backpack:GetChildren()) do
+            if inst:IsA("Tool") and inst.Name:lower():find(targetName, 1, true) then
+                return true
+            end
+        end
+    end
+    
+    -- Check toolbar
+    local toolbarContainer = LocalPlayer.PlayerGui:FindFirstChild("MainGui", true)
+        and LocalPlayer.PlayerGui.MainGui:FindFirstChild("Panels", true)
+        and LocalPlayer.PlayerGui.MainGui.Panels:FindFirstChild("Toolbar", true)
+        and LocalPlayer.PlayerGui.MainGui.Panels.Toolbar:FindFirstChild("Container", true)
+    
+    if toolbarContainer then
+        for i = 1, 6 do -- Standard 1-6 slots
+            local n = tostring(i)
+            local slot = toolbarContainer:FindFirstChild(n) or toolbarContainer:FindFirstChild("Slot" .. n)
+            
+            local title = slot and slot:FindFirstChild("Title", true)
+            if title and title.Text:lower():find(targetName, 1, true) then
+                return true
+            end
+        end
+    end
+    
+    -- Check inventory
+    local inventoryList = LocalPlayer.PlayerGui:FindFirstChild("MainGui", true)
+        and LocalPlayer.PlayerGui.MainGui:FindFirstChild("RightPanel", true)
+        and LocalPlayer.PlayerGui.MainGui.RightPanel:FindFirstChild("Inventory", true)
+        and LocalPlayer.PlayerGui.MainGui.RightPanel.Inventory:FindFirstChild("List", true)
+
+    if inventoryList then
+        for _, item in ipairs(inventoryList:GetChildren()) do
+            if item:IsA("GuiObject") and item.Name:lower():find(targetName, 1, true) then
+                return true
+            end
+        end
+    end
+    
+    return false
+end
+
+stopPrepare = function()
+    prepareToken = prepareToken + 1
+    isPreparing = false
+    stopGotoWalk()
+end
+
+startPrepareTool = function(itemName, pos1, pos2)
+    stopPrepare()
+    local myToken = prepareToken
+    isPreparing = true
+    
+    task.spawn(function()
+        sendNotify("Prepare", "Starting prep for: " .. itemName)
+
+        local targetLower = (itemName or ""):lower()
+        local STOP_PREP_WHEN_FOUND = true -- user request: stop once the tool is found
+
+        -- Active scan state
+        local lastSlotStep = 0
+        local SLOT_STEP_INTERVAL = 0.35 -- seconds; one slot step each interval (cycles 1-6)
+        local slotCursor = 1
+
+        local lastInvUse = 0
+        local INV_USE_COOLDOWN = 1.5 -- seconds; avoid spamming UseBagItem
+
+        local function getToolbarTitleTextLower()
+            local toolbarContainer = LocalPlayer.PlayerGui:FindFirstChild("MainGui", true)
+                and LocalPlayer.PlayerGui.MainGui:FindFirstChild("Panels", true)
+                and LocalPlayer.PlayerGui.MainGui.Panels:FindFirstChild("Toolbar", true)
+                and LocalPlayer.PlayerGui.MainGui.Panels.Toolbar:FindFirstChild("Container", true)
+            local toolbarTitle = toolbarContainer and toolbarContainer:FindFirstChild("Title", true)
+            local txt = toolbarTitle and toolbarTitle.Text or ""
+            if type(txt) ~= "string" then
+                return ""
+            end
+            return txt:lower()
+        end
+
+        local function findInventoryOrderByNameLower(nameLower)
+            local inventoryList = LocalPlayer.PlayerGui:FindFirstChild("MainGui", true)
+                and LocalPlayer.PlayerGui.MainGui:FindFirstChild("RightPanel", true)
+                and LocalPlayer.PlayerGui.MainGui.RightPanel:FindFirstChild("Inventory", true)
+                and LocalPlayer.PlayerGui.MainGui.RightPanel.Inventory:FindFirstChild("List", true)
+
+            if not inventoryList then
+                return nil
+            end
+
+            for _, item in ipairs(inventoryList:GetChildren()) do
+                if item:IsA("GuiObject") then
+                    local n = item.Name
+                    if type(n) == "string" and n:lower():find(nameLower, 1, true) then
+                        return item.LayoutOrder
+                    end
+                end
+            end
+
+            return nil
+        end
+
+        local function stepSlotScan(nameLower)
+            -- Equip one slot, then check the (currently-equipped) toolbar title.
+            local slot = slotCursor
+            slotCursor = (slotCursor % 6) + 1
+
+            fireEquip(slot)
+
+            -- Small yield so UI/replication has a chance to update.
+            task.wait(0.2)
+
+            local titleLower = getToolbarTitleTextLower()
+            if titleLower ~= "" and titleLower:find(nameLower, 1, true) then
+                return true
+            end
+            return false
+        end
+
+        while isRunning and myToken == prepareToken do
+            local hasIt = hasToolInInventory(itemName)
+            local targetPos = hasIt and pos1 or pos2
+            local now = os.clock()
+
+            -- Always actively scan slots 1-6 (round-robin), so we don't miss tools
+            -- that only appear when a slot is equipped.
+            if (now - lastSlotStep) >= SLOT_STEP_INTERVAL then
+                lastSlotStep = now
+                local foundInSlots = stepSlotScan(targetLower)
+                if foundInSlots then
+                    hasIt = true
+                    targetPos = pos1
+                end
+            end
+
+            -- Always check inventory UI list; if present there, try using it to move to toolbar.
+            -- This helps when the tool exists but isn't currently in any of the 1-6 toolbar slots.
+            local invOrder = findInventoryOrderByNameLower(targetLower)
+            if invOrder and (now - lastInvUse) >= INV_USE_COOLDOWN then
+                lastInvUse = now
+                fireInventoryUse(invOrder)
+            end
+            
+            if not hasIt then
+                -- Targeted auto-pickup while searching
+                local items = workspace:FindFirstChild("Items")
+                if items then
+                    for _, item in ipairs(items:GetChildren()) do
+                        if item.Name:lower():find(itemName:lower(), 1, true) then
+                            local char, hum, root = getMyRig()
+                            if root then
+                                local partPos = nil
+                                if item:IsA("BasePart") then
+                                    partPos = item.Position
+                                elseif item:IsA("Model") then
+                                    local pp = item.PrimaryPart or item:FindFirstChildWhichIsA("BasePart", true)
+                                    partPos = pp and pp.Position or nil
+                                end
+
+                                local dist = (partPos and (partPos - root.Position).Magnitude) or math.huge
+                                if dist < PICKUP_RANGE then
+                                    firePickup(item)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            
+            -- Move towards current destination
+            -- NOTE: walkToUntilWithin() is blocking; give it a short timeout so we keep
+            -- scanning/picking while traveling.
+            local reached = walkToUntilWithin(targetPos, 6, { timeoutSeconds = 1.0 })
+
+            -- If we have the tool and we managed to reach the "have tool" position,
+            -- stop the preparing loop entirely.
+            if STOP_PREP_WHEN_FOUND and hasIt and reached and targetPos == pos1 then
+                stopPrepare()
+                break
+            end
+            task.wait(0.25)
+        end
+    end)
+end
+
 -- Centralized movement helpers so actions (tween/slide/walk/formation) reuse the same codepaths.
 local activeMoveTween = nil
 local activeFollowTween = nil
@@ -620,7 +898,7 @@ local function stopFollowTween()
     end
 end
 
-local function getMyRig()
+getMyRig = function()
     local char = LocalPlayer.Character
     if not char then return nil end
     local humanoid = char:FindFirstChildOfClass("Humanoid")
@@ -637,6 +915,159 @@ end
 
 local function shouldStopGoto(dist)
     return dist < GOTO_STOP_DISTANCE
+end
+
+-- Shared "humanoid MoveTo until X" helper used by both:
+-- - startGotoWalkMoveTo(): async walking until close enough (goto-style)
+-- - walkToUntilWithin(): blocking walk until within distance (route/drop-style)
+--
+-- opts:
+--   token (number)            : cancel token to respect (usually `gotoWalkToken` snapshot)
+--   stopDistance (number)     : distance at/below which we consider "reached"
+--   stopTolerance (number)    : extra tolerance (only applied in wrappers if needed)
+--   distanceMode (string)     : "3d" or "2d_xz"
+--   forceAutoJump (boolean)   : default true; increments/decrements force counter
+--   refresh (number)          : MoveTo refresh period (seconds)
+--   timeoutSeconds (number?)  : optional overall timeout
+--   stuckTime (number?)       : optional seconds of "not moving" before considered stuck
+--   stuckEps (number?)        : studs moved per tick below which we count as "not moving"
+--   abortOnStuck (boolean?)   : if true and stuck triggers, abort instead of nudging
+--   stopMovementOnReach (bool): if true, zero humanoid movement on reach
+-- returns: reached (bool), lastDist (number), stoppedBy (string)
+local function runMoveToUntil(targetPos, opts)
+    opts = opts or {}
+
+    local token = opts.token
+    local stopDistance = tonumber(opts.stopDistance) or GOTO_STOP_DISTANCE
+    local distanceMode = opts.distanceMode or "3d" -- "3d" | "2d_xz"
+    local refresh = tonumber(opts.refresh) or WALKTO_REFRESH
+
+    local timeoutSeconds = tonumber(opts.timeoutSeconds)
+    local stuckTimeLimit = tonumber(opts.stuckTime)
+    local stuckEps = tonumber(opts.stuckEps) or GOTO_STUCK_EPS
+    local abortOnStuck = (opts.abortOnStuck == true)
+    local stopMovementOnReach = (opts.stopMovementOnReach == true)
+
+    local forceAutoJump = true
+    if opts.forceAutoJump ~= nil then
+        forceAutoJump = (opts.forceAutoJump == true)
+    end
+
+    local didForceAutoJump = false
+    if forceAutoJump then
+        beginForceAutoJump()
+        didForceAutoJump = true
+    end
+
+    local reached = false
+    local stoppedBy = "canceled"
+    local lastDist = math.huge
+
+    local startT = os.clock()
+    local lastMoveTo = 0
+    local lastPos = nil
+    local stuckTime = 0
+
+    local function cleanup()
+        if didForceAutoJump then
+            endForceAutoJump()
+        end
+    end
+
+    local ok, err = pcall(function()
+        while isRunning and (token == nil or token == gotoWalkToken) do
+            local delta = RunService.Heartbeat:Wait()
+
+            if timeoutSeconds and (os.clock() - startT) >= timeoutSeconds then
+                stoppedBy = "timeout"
+                break
+            end
+
+            local myChar = LocalPlayer.Character
+            local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+            local myHumanoid = myChar and myChar:FindFirstChildOfClass("Humanoid")
+
+            if myHumanoid and myHumanoid.SeatPart then
+                myHumanoid.Sit = false
+            end
+
+            if not (myRoot and myHumanoid) then
+                lastPos = nil
+                stuckTime = 0
+            else
+                local dist
+                if distanceMode == "2d_xz" then
+                    dist = (Vector2.new(targetPos.X, targetPos.Z) - Vector2.new(myRoot.Position.X, myRoot.Position.Z)).Magnitude
+                else
+                    dist = (targetPos - myRoot.Position).Magnitude
+                end
+                lastDist = dist
+
+                if dist <= stopDistance then
+                    reached = true
+                    stoppedBy = "reached"
+
+                    if stopMovementOnReach then
+                        pcall(function()
+                            myHumanoid:Move(Vector3.new(0, 0, 0), false)
+                            myHumanoid:MoveTo(myRoot.Position)
+                        end)
+                    end
+                    break
+                end
+
+                -- Refresh MoveTo periodically.
+                if os.clock() - lastMoveTo > refresh then
+                    lastMoveTo = os.clock()
+                    pcall(function()
+                        myHumanoid:MoveTo(targetPos)
+                    end)
+                end
+
+                -- Optional stuck detection for MoveTo loops.
+                if stuckTimeLimit then
+                    if lastPos then
+                        local moved = (myRoot.Position - lastPos).Magnitude
+                        if moved < stuckEps then
+                            stuckTime = stuckTime + (delta or 0)
+                        else
+                            stuckTime = 0
+                        end
+                    end
+                    lastPos = myRoot.Position
+
+                    if stuckTime >= stuckTimeLimit then
+                        if abortOnStuck then
+                            stoppedBy = "stuck"
+                            break
+                        end
+
+                        -- Nudge: refresh MoveTo and apply a short Move vector toward the target.
+                        stuckTime = 0
+                        pcall(function()
+                            local offset = targetPos - myRoot.Position
+                            local dir = Vector3.new(offset.X, 0, offset.Z)
+                            if dir.Magnitude > 1e-6 then
+                                dir = dir.Unit
+                                myHumanoid:MoveTo(targetPos)
+                                myHumanoid:Move(dir, false)
+                            else
+                                myHumanoid:MoveTo(targetPos)
+                            end
+                        end)
+                    end
+                end
+            end
+        end
+    end)
+
+    cleanup()
+    if not ok then
+        stoppedBy = "error"
+        warn("[MOVE] MoveTo loop error:", err)
+    end
+
+    return reached, lastDist, stoppedBy
 end
 
 -- Forward declarations so Movement methods can call these without accidental global lookups.
@@ -815,7 +1246,7 @@ startGotoWalk = function(targetPos)
     end)
 end
 
-startGotoWalkMoveTo = function(targetPos)
+startGotoWalkMoveTo = function(targetPos, opts)
     stopGotoWalk()
     stopFollowing()
 
@@ -831,42 +1262,27 @@ startGotoWalkMoveTo = function(targetPos)
 
     -- Classic Roblox walking: keep calling MoveTo until we're close enough.
     local myToken = gotoWalkToken
-    beginForceAutoJump()
+    opts = opts or {}
     task.spawn(function()
-        local didCleanup = false
-        local function cleanup()
-            if didCleanup then return end
-            didCleanup = true
-            endForceAutoJump()
-        end
-
         local ok, err = pcall(function()
-            local lastMoveTo = 0
-            while isRunning and myToken == gotoWalkToken do
-                RunService.Heartbeat:Wait()
+            local reached = runMoveToUntil(targetPos, {
+                token = myToken,
+                stopDistance = GOTO_STOP_DISTANCE,
+                distanceMode = "3d",
+                forceAutoJump = true,
+                refresh = WALKTO_REFRESH,
+                timeoutSeconds = opts.timeoutSeconds,
+                stuckTime = opts.stuckTime,
+                stuckEps = opts.stuckEps,
+                abortOnStuck = opts.abortOnStuck,
+                stopMovementOnReach = true
+            })
 
-                local myChar = LocalPlayer.Character
-                local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-                local myHumanoid = myChar and myChar:FindFirstChildOfClass("Humanoid")
-                if myRoot and myHumanoid then
-                    local dist = (targetPos - myRoot.Position).Magnitude
-                    if shouldStopGoto(dist) then
-                        stopGotoWalk()
-                        break
-                    end
-
-                    -- Some games need MoveTo refreshed periodically.
-                    if os.clock() - lastMoveTo > WALKTO_REFRESH then
-                        lastMoveTo = os.clock()
-                        pcall(function()
-                            myHumanoid:MoveTo(targetPos)
-                        end)
-                    end
-                end
+            -- If we reached the target and we're still the active walk token, clear state.
+            if reached and myToken == gotoWalkToken then
+                stopGotoWalk()
             end
         end)
-
-        cleanup()
         if not ok then
             warn("[WALKTO] Walk loop error:", err)
         end
@@ -1055,7 +1471,7 @@ local function fireVoodoo(targetPos)
     end
 end
 
-local function fireEquip(slot)
+fireEquip = function(slot)
     local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
     if not ByteNetRemote then return end
     
@@ -1082,7 +1498,7 @@ local function fireInventoryStore(slot)
     ByteNetRemote:FireServer(b)
 end
 
-local function fireInventoryUse(order)
+fireInventoryUse = function(order)
     local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
     if not ByteNetRemote then return end
     
@@ -1247,10 +1663,15 @@ local function dropItemByName(itemName, quantity)
     print("[DROP] Dropped " .. dropped .. "x " .. itemName)
 end
 
-walkToUntilWithin = function(targetPos, stopDistance)
+walkToUntilWithin = function(targetPos, stopDistance, opts)
     -- Returns true if we actually reached the stopDistance, false if cancelled/aborted.
     stopDistance = tonumber(stopDistance) or 6
     local STOP_TOLERANCE = 0.1 -- studs; allow minor overshoot/latency before considering it "reached"
+    opts = opts or {}
+    local forceAutoJump = true
+    if opts.forceAutoJump ~= nil then
+        forceAutoJump = (opts.forceAutoJump == true)
+    end
 
     -- Cancel any existing goto loops so this doesn't fight them.
     stopGotoWalk()
@@ -1259,48 +1680,30 @@ walkToUntilWithin = function(targetPos, stopDistance)
     stopFollowTween()
 
     local myToken = gotoWalkToken
-    beginForceAutoJump()
-
     local reached = false
     local lastDist = math.huge
     local ok, err = pcall(function()
-        local lastMoveTo = 0
-        while isRunning and myToken == gotoWalkToken do
-            RunService.Heartbeat:Wait()
+        local stoppedBy
+        reached, lastDist, stoppedBy = runMoveToUntil(targetPos, {
+            token = myToken,
+            stopDistance = stopDistance,
+            distanceMode = "2d_xz",
+            forceAutoJump = forceAutoJump,
+            refresh = WALKTO_REFRESH,
+            timeoutSeconds = opts.timeoutSeconds,
+            stuckTime = opts.stuckTime,
+            stuckEps = opts.stuckEps,
+            abortOnStuck = opts.abortOnStuck,
+            stopMovementOnReach = true
+        })
 
-            local myChar = LocalPlayer.Character
-            local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-            local myHumanoid = myChar and myChar:FindFirstChildOfClass("Humanoid")
-
-            if myHumanoid and myHumanoid.SeatPart then
-                myHumanoid.Sit = false
-            end
-
-            if myRoot and myHumanoid then
-                local dist = (Vector2.new(targetPos.X, targetPos.Z) - Vector2.new(myRoot.Position.X, myRoot.Position.Z)).Magnitude
-                lastDist = dist
-                if dist <= stopDistance then
-                    -- Stop pushing MoveTo once we're close enough.
-                    pcall(function()
-                        myHumanoid:Move(Vector3.new(0, 0, 0), false)
-                        myHumanoid:MoveTo(myRoot.Position)
-                    end)
-                    reached = true
-                    break
-                end
-
-                -- Refresh MoveTo periodically.
-                if os.clock() - lastMoveTo > WALKTO_REFRESH then
-                    lastMoveTo = os.clock()
-                    pcall(function()
-                        myHumanoid:MoveTo(targetPos)
-                    end)
-                end
-            end
+        -- If we timed out or got stuck, log a hint (the caller decides what to do).
+        if (not reached) and (stoppedBy == "timeout") then
+            warn("[MOVE] walkToUntilWithin timed out.")
+        elseif (not reached) and (stoppedBy == "stuck") then
+            warn("[MOVE] walkToUntilWithin aborted (stuck).")
         end
     end)
-
-    endForceAutoJump()
     if not ok then
         warn("[DROP] WalkTo loop error:", err)
     end
@@ -1868,7 +2271,6 @@ local function scanAndEquip(toolName)
     print("[SCAN] Failed to find " .. toolName .. " anywhere")
     return false
 end
-
 local function showToolSearchDialog()
     local coreGui = LocalPlayer:FindFirstChild("PlayerGui")
     if not coreGui then return end
@@ -1935,6 +2337,126 @@ local function showToolSearchDialog()
     end)
 end
 
+local function showPrepareFinishGUI()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return end
+    
+    if pg:FindFirstChild("ArmyPrepareFinish") then
+        pg.ArmyPrepareFinish:Destroy()
+    end
+    
+    local screenGui = Instance.new("ScreenGui", pg)
+    screenGui.Name = "ArmyPrepareFinish"
+    screenGui.ResetOnSpawn = false
+    
+    local btn = Instance.new("TextButton", screenGui)
+    btn.Size = UDim2.new(0, 180, 0, 40)
+    btn.Position = UDim2.new(0.5, -90, 0.8, 0)
+    btn.BackgroundColor3 = Color3.fromRGB(150, 120, 255)
+    btn.Text = "Finish Preparing"
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 14
+    Instance.new("UICorner", btn)
+    Instance.new("UIStroke", btn).Color = Color3.fromRGB(80, 80, 90)
+    
+    btn.MouseButton1Click:Connect(function()
+        -- Stop locally immediately, then broadcast cancel so soldiers stop too.
+        stopPrepare()
+        sendCommand("cancel")
+        screenGui:Destroy()
+    end)
+end
+
+local function showPrepareDialog()
+    local coreGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if not coreGui then return end
+    
+    local dialog = Instance.new("ScreenGui", coreGui)
+    dialog.Name = "ArmyPrepareDialog"
+    
+    local frame = Instance.new("Frame", dialog)
+    frame.Size = UDim2.new(0, 300, 0, 150)
+    frame.Position = UDim2.new(0.5, -150, 0.5, -75)
+    frame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+    frame.BorderSizePixel = 0
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 10)
+    Instance.new("UIStroke", frame).Color = Color3.fromRGB(60, 60, 70)
+    
+    local title = Instance.new("TextLabel", frame)
+    title.Size = UDim2.new(1, 0, 0, 40)
+    title.Text = "Prepare Army Tool"
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.TextSize = 16
+    title.Font = Enum.Font.GothamBold
+    title.BackgroundTransparency = 1
+    
+    local input = Instance.new("TextBox", frame)
+    input.Size = UDim2.new(0.8, 0, 0, 35)
+    input.Position = UDim2.new(0.1, 0, 0.35, 0)
+    input.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+    input.Text = ""
+    input.PlaceholderText = "Tool Name (e.g. Wood Hoe)"
+    input.TextColor3 = Color3.fromRGB(255, 255, 255)
+    input.TextSize = 14
+    input.Font = Enum.Font.Gotham
+    Instance.new("UICorner", input).CornerRadius = UDim.new(0, 6)
+    
+    local confirm = Instance.new("TextButton", frame)
+    confirm.Size = UDim2.new(0.35, 0, 0, 30)
+    confirm.Position = UDim2.new(0.1, 0, 0.7, 0)
+    confirm.BackgroundColor3 = Color3.fromRGB(150, 120, 255)
+    confirm.Text = "OK"
+    confirm.TextColor3 = Color3.fromRGB(255, 255, 255)
+    confirm.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", confirm).CornerRadius = UDim.new(0, 6)
+    
+    local cancel = Instance.new("TextButton", frame)
+    cancel.Size = UDim2.new(0.35, 0, 0, 30)
+    cancel.Position = UDim2.new(0.55, 0, 0.7, 0)
+    cancel.BackgroundColor3 = Color3.fromRGB(100, 100, 110)
+    cancel.Text = "Cancel"
+    cancel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    cancel.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", cancel).CornerRadius = UDim.new(0, 6)
+    
+    confirm.MouseButton1Click:Connect(function()
+        local itemName = input.Text
+        if itemName ~= "" then
+            dialog:Destroy()
+            
+            sendNotify("Prepare", "Select Pos 1: Have the tool")
+            setPendingClick(Mouse.Button1Down:Connect(function()
+                if Mouse.Hit then
+                    local p1 = Mouse.Hit.Position
+                    cancelPendingClick()
+                    
+                    task.wait(0.2)
+                    sendNotify("Prepare", "Select Pos 2: Don't have it")
+                    setPendingClick(Mouse.Button1Down:Connect(function()
+                        if Mouse.Hit then
+                            local p2 = Mouse.Hit.Position
+                            cancelPendingClick()
+                            
+                            local cmd = string.format("prepare_tool %s %.1f,%.1f,%.1f %.1f,%.1f,%.1f",
+                                itemName, p1.X, p1.Y, p1.Z, p2.X, p2.Y, p2.Z)
+                            sendCommand(cmd)
+                            sendNotify("Prepare", "Enforcing: " .. itemName)
+                            showPrepareFinishGUI()
+                        end
+                    end), nil)
+                end
+            end), nil)
+        else
+            dialog:Destroy()
+        end
+    end)
+    
+    cancel.MouseButton1Click:Connect(function()
+        dialog:Destroy()
+    end)
+end
+
 local function terminateScript()
     isRunning = false
     sendNotify("Army Script", "Script Terminated")
@@ -1961,6 +2483,12 @@ local function terminateScript()
         if tlm then tlm:Destroy() end
         local frm = pg and pg:FindFirstChild("ArmyFarmMenu")
         if frm then frm:Destroy() end
+        local rtm = pg and pg:FindFirstChild("ArmyRouteManager")
+        if rtm then rtm:Destroy() end
+        local rte = pg and pg:FindFirstChild("ArmyRouteEditor")
+        if rte then rte:Destroy() end
+        local pfn = pg and pg:FindFirstChild("ArmyPrepareFinish")
+        if pfn then pfn:Destroy() end
     end)
 
     for _, conn in ipairs(connections) do
@@ -1972,6 +2500,11 @@ local function terminateScript()
     end
     isPanelOpen = false
     isCommander = false
+
+    if infJumpConnection then
+        infJumpConnection:Disconnect()
+        infJumpConnection = nil
+    end
 end
 
 
@@ -2138,26 +2671,21 @@ end
 startFarmingTarget = function(targetPos)
     stopFarming()
     local myToken = farmToken
+    isFarming = true
     
     task.spawn(function()
         local targetObject = nil
-        -- Find object at targetPos
+        
         local function getClosestPointOnPart(part, point)
             local partCFrame = part.CFrame
             local size = part.Size
-            
-            -- Transform point to object space
             local localPoint = partCFrame:PointToObjectSpace(point)
-            
-            -- Clamp point within part size boundaries
             local halfSize = size / 2
             local clampedLocal = Vector3.new(
                 math.clamp(localPoint.X, -halfSize.X, halfSize.X),
                 math.clamp(localPoint.Y, -halfSize.Y, halfSize.Y),
                 math.clamp(localPoint.Z, -halfSize.Z, halfSize.Z)
             )
-            
-            -- Transform back to world space
             return partCFrame:PointToWorldSpace(clampedLocal)
         end
 
@@ -2179,6 +2707,7 @@ startFarmingTarget = function(targetPos)
         targetObject = findTarget()
         if not targetObject then
             sendNotify("Farm", "Target not found at position")
+            isFarming = false
             return
         end
         
@@ -2189,7 +2718,6 @@ startFarmingTarget = function(targetPos)
         
         while isRunning and myToken == farmToken do
             if not targetObject or not targetObject.Parent then
-                -- Re-scan briefly in case it moved or was replaced
                 targetObject = findTarget()
                 if not targetObject then break end
             end
@@ -2201,64 +2729,42 @@ startFarmingTarget = function(targetPos)
             local targetPart = targetObject:IsA("BasePart") and targetObject or (targetObject:IsA("Model") and targetObject.PrimaryPart)
             if not targetPart then break end
             
-            local objPos = targetPart.Position
             local closestWorld = getClosestPointOnPart(targetPart, currentPos)
-            
-            -- Use 2D distance to closest point on surface for stopping
             local dist2D = (Vector3.new(currentPos.X, 0, currentPos.Z) - Vector3.new(closestWorld.X, 0, closestWorld.Z)).Magnitude
             
-            -- Movement and Stuck Detection
             if dist2D > 6 then
-                Movement.walkTo(objPos) -- Walk towards center for pathfinding
+                Movement.walkTo(targetPart.Position)
                 
                 if not lastPos or (currentPos - lastPos).Magnitude > 1 then
                     lastPos = currentPos
                     lastMoveTime = os.clock()
                 elseif os.clock() - lastMoveTime > 2 then
-                    -- Stuck for 2s: cancel
                     sendNotify("Farm", "Soldier stuck - cancelling farm")
                     stopFarming()
                     break
                 end
             else
                 stopGotoWalk()
-                -- Reset stuck timer while farming
                 lastPos = currentPos
                 lastMoveTime = os.clock()
                 
-                -- Look at target (center)
-                pcall(function()
-                    root.CFrame = CFrame.new(root.Position, Vector3.new(objPos.X, root.Position.Y, objPos.Z))
-                end)
-            end
-            
-            -- Swing Logic: Use distance to surface for hitting
-            local dist3D = (currentPos - closestWorld).Magnitude
-            if dist3D <= 15 and os.clock() - lastSwing >= swingDelay then
-                local eid = targetObject:GetAttribute("EntityID")
-                if eid then
-                    lastSwing = os.clock()
-                    local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
-                    if ByteNetRemote then
-                        local b = buffer.create(8)
-                        buffer.writeu8(b, 0, 0)
-                        buffer.writeu8(b, 1, 17) -- SwingTool
-                        buffer.writeu16(b, 2, 1) -- count
-                        buffer.writeu32(b, 4, eid)
-                        ByteNetRemote:FireServer(b)
+                if os.clock() - lastSwing >= swingDelay then
+                    local entityID = targetObject:GetAttribute("EntityID")
+                    if entityID then
+                        fireAction(17, entityID)
+                        lastSwing = os.clock()
                     end
                 end
             end
-            
             task.wait(0.1)
         end
         
         if myToken == farmToken then
-            sendNotify("Farm", "Target depleted or lost")
-            stopFarming()
+            isFarming = false
         end
     end)
 end
+
 
 local function showFarmMenu()
     local pg = LocalPlayer:FindFirstChild("PlayerGui")
@@ -2369,8 +2875,8 @@ local function showToolsMenu()
     screenGui.ResetOnSpawn = false
     
     local panel = Instance.new("Frame", screenGui)
-    panel.Size = UDim2.new(0, 250, 0, 180)
-    panel.Position = UDim2.new(0.5, -125, 0.5, -90)
+    panel.Size = UDim2.new(0, 250, 0, 230)
+    panel.Position = UDim2.new(0.5, -125, 0.5, -115)
     panel.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
     panel.BorderSizePixel = 0
     Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 10)
@@ -2414,10 +2920,23 @@ local function showToolsMenu()
         screenGui:Destroy()
         showToolSearchDialog() 
     end)
+
+    local prepareBtn = Instance.new("TextButton", panel)
+    prepareBtn.Size = UDim2.new(1, -20, 0, 40)
+    prepareBtn.Position = UDim2.new(0, 10, 0, 110)
+    prepareBtn.BackgroundColor3 = Color3.fromRGB(150, 120, 255)
+    prepareBtn.Text = "Prepare Tool"
+    prepareBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    prepareBtn.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", prepareBtn)
+    prepareBtn.MouseButton1Click:Connect(function() 
+        screenGui:Destroy()
+        showPrepareDialog() 
+    end)
     
     local unequipBtn = Instance.new("TextButton", panel)
     unequipBtn.Size = UDim2.new(1, -20, 0, 40)
-    unequipBtn.Position = UDim2.new(0, 10, 0, 110)
+    unequipBtn.Position = UDim2.new(0, 10, 0, 160)
     unequipBtn.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
     unequipBtn.Text = "Unequip Tools"
     unequipBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -2456,7 +2975,8 @@ local function showRouteEditor(routeName)
     title.Size = UDim2.new(1, -100, 1, 0)
     title.Position = UDim2.new(0, 15, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "NEW ROUTE: " .. string.upper(routeName)
+    local currentRouteName = tostring(routeName or "")
+    title.Text = "NEW ROUTE: " .. string.upper(currentRouteName)
     title.TextColor3 = Color3.fromRGB(255, 255, 255)
     title.TextSize = 14
     title.Font = Enum.Font.GothamBold
@@ -2474,10 +2994,45 @@ local function showRouteEditor(routeName)
         screenGui:Destroy() 
         showRouteManager()
     end)
-    
+
+    -- Route name input (lets you override the auto "Route N" name).
+    local nameBox = Instance.new("TextBox", panel)
+    nameBox.Size = UDim2.new(1, -20, 0, 30)
+    nameBox.Position = UDim2.new(0, 10, 0, 60)
+    nameBox.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
+    nameBox.BorderSizePixel = 0
+    nameBox.Text = currentRouteName
+    nameBox.PlaceholderText = "Route name"
+    nameBox.TextColor3 = Color3.fromRGB(235, 235, 235)
+    nameBox.PlaceholderColor3 = Color3.fromRGB(130, 130, 140)
+    nameBox.TextSize = 13
+    nameBox.Font = Enum.Font.GothamSemibold
+    Instance.new("UICorner", nameBox)
+
+    local function commitRouteName()
+        local txt = tostring(nameBox.Text or "")
+        txt = txt:gsub("^%s+", ""):gsub("%s+$", "")
+        -- Keep a sane default if the user clears the field.
+        if txt == "" then
+            txt = tostring(routeName or "Route")
+        end
+        -- Prevent extremely long names from blowing up UI and URLs.
+        if #txt > 48 then
+            txt = string.sub(txt, 1, 48)
+        end
+        currentRouteName = txt
+        nameBox.Text = currentRouteName
+        title.Text = "NEW ROUTE: " .. string.upper(currentRouteName)
+    end
+
+    nameBox.FocusLost:Connect(function()
+        commitRouteName()
+    end)
+
     local content = Instance.new("ScrollingFrame", panel)
-    content.Size = UDim2.new(1, -20, 1, -130)
-    content.Position = UDim2.new(0, 10, 0, 60)
+    -- Push content down to make room for the nameBox.
+    content.Size = UDim2.new(1, -20, 1, -170)
+    content.Position = UDim2.new(0, 10, 0, 100)
     content.BackgroundTransparency = 1
     content.BorderSizePixel = 0
     content.ScrollBarThickness = 2
@@ -2559,9 +3114,14 @@ local function showRouteEditor(routeName)
     Instance.new("UICorner", saveBtn)
     
     saveBtn.MouseButton1Click:Connect(function()
+        commitRouteName()
         if #waypoints > 0 then
-            savedRoutes[routeName] = { waypoints = waypoints }
-            syncSaveRoute(routeName, waypoints)
+            if not currentRouteName or currentRouteName == "" then
+                sendNotify("Error", "Please name the route")
+                return
+            end
+            savedRoutes[currentRouteName] = { waypoints = waypoints }
+            syncSaveRoute(currentRouteName, waypoints)
             screenGui:Destroy()
             showRouteManager()
         else
@@ -2629,8 +3189,16 @@ showRouteManager = function()
     
     addBtn.MouseButton1Click:Connect(function()
         screenGui:Destroy()
-        local name = "Route " .. (os.time() % 1000)
-        showRouteEditor(name)
+        -- Pick a deterministic next "Route N" name instead of a time-based value.
+        local maxN = 0
+        for existingName, _ in pairs(savedRoutes) do
+            local n = tonumber(string.match(existingName, "^Route%s+(%d+)$"))
+            if n and n > maxN then
+                maxN = n
+            end
+        end
+        local nextName = "Route " .. tostring(maxN + 1)
+        showRouteEditor(nextName)
     end)
     
     local close = Instance.new("TextButton", header)
@@ -2660,7 +3228,32 @@ showRouteManager = function()
         end
         
         local any = false
-        for name, data in pairs(savedRoutes) do
+        -- `pairs()` iteration order is unspecified, so sort route names for a stable ascending list.
+        local routeNames = {}
+        for routeName, _ in pairs(savedRoutes) do
+            table.insert(routeNames, routeName)
+        end
+        table.sort(routeNames, function(a, b)
+            local na = tonumber(string.match(a, "^Route%s+(%d+)$"))
+            local nb = tonumber(string.match(b, "^Route%s+(%d+)$"))
+            if na and nb then
+                return na < nb
+            end
+            if na and not nb then
+                return true
+            end
+            if not na and nb then
+                return false
+            end
+            return tostring(a):lower() < tostring(b):lower()
+        end)
+
+        for _, name in ipairs(routeNames) do
+            local data = savedRoutes[name]
+            if data then
+                -- Capture loop vars; Luau closures otherwise see the final loop values.
+                local routeName = name
+                local routeData = data
             any = true
             local row = Instance.new("Frame", content)
             row.Size = UDim2.new(1, 0, 0, 50)
@@ -2668,14 +3261,14 @@ showRouteManager = function()
             Instance.new("UICorner", row)
             
             local l = Instance.new("TextLabel", row)
-            l.Size = UDim2.new(1, -120, 1, 0)
-            l.Position = UDim2.new(0, 10, 0, 0)
-            l.BackgroundTransparency = 1
-            l.Text = name .. " (" .. #data.waypoints .. " pts)"
-            l.TextColor3 = Color3.fromRGB(220, 220, 220)
-            l.TextSize = 13
-            l.Font = Enum.Font.GothamSemibold
-            l.TextXAlignment = Enum.TextXAlignment.Left
+             l.Size = UDim2.new(1, -120, 1, 0)
+             l.Position = UDim2.new(0, 10, 0, 0)
+             l.BackgroundTransparency = 1
+             l.Text = routeName .. " (" .. #routeData.waypoints .. " pts)"
+             l.TextColor3 = Color3.fromRGB(220, 220, 220)
+             l.TextSize = 13
+             l.Font = Enum.Font.GothamSemibold
+             l.TextXAlignment = Enum.TextXAlignment.Left
             
             local play = Instance.new("TextButton", row)
             play.Size = UDim2.new(0, 50, 0, 30)
@@ -2687,9 +3280,9 @@ showRouteManager = function()
             Instance.new("UICorner", play)
             
             play.MouseButton1Click:Connect(function()
-                local json = HttpService:JSONEncode({ waypoints = data.waypoints })
+                local json = HttpService:JSONEncode({ waypoints = routeData.waypoints })
                 sendCommand("execute_route " .. json)
-                sendNotify("Route", "Broadcasting route: " .. name)
+                sendNotify("Route", "Broadcasting route: " .. routeName)
                 screenGui:Destroy()
             end)
             
@@ -2703,10 +3296,11 @@ showRouteManager = function()
             Instance.new("UICorner", del)
             
             del.MouseButton1Click:Connect(function()
-                savedRoutes[name] = nil
-                syncDeleteRoute(name)
+                savedRoutes[routeName] = nil
+                syncDeleteRoute(routeName)
                 refreshRoutes()
             end)
+            end
         end
         
         if not any then
@@ -3358,6 +3952,15 @@ local function createPanel()
                 Callback = function()
                     showRouteManager()
                 end
+            },
+            {
+                Text = "InfJump: " .. (infJumpEnabled and "ON" or "OFF"),
+                Color = Color3.fromRGB(100, 255, 200),
+                Callback = function(btn)
+                    infJumpEnabled = not infJumpEnabled
+                    btn.Text = "InfJump: " .. (infJumpEnabled and "ON" or "OFF")
+                    sendNotify("Settings", "Infinite Jump: " .. (infJumpEnabled and "Enabled" or "Disabled"))
+                end
             }
         }
     })
@@ -3764,6 +4367,14 @@ local function createPanel()
             Color = Color3.fromRGB(255, 100, 50),
             Buttons = {
                 {
+                    Text = "Spawn",
+                    Color = Color3.fromRGB(100, 255, 100),
+                    Callback = function()
+                        sendCommand("spawn")
+                        sendNotify("Army", "Broadcasting spawn command")
+                    end
+                },
+                {
                     Text = "Auto Voodoo",
                     Color = Color3.fromRGB(200, 100, 255),
                     Callback = function()
@@ -3873,6 +4484,7 @@ table.insert(connections, UserInputService.InputBegan:Connect(function(input, pr
                             if pg:FindFirstChild("ArmyFarmMenu") then pg.ArmyFarmMenu:Destroy() end
                             if pg:FindFirstChild("ArmyRouteManager") then pg.ArmyRouteManager:Destroy() end
                             if pg:FindFirstChild("ArmyRouteEditor") then pg.ArmyRouteEditor:Destroy() end
+                            -- We explicitly DO NOT destroy ArmyPrepareFinish here so it stays visible
                         end
                     end)
                 end
@@ -3915,6 +4527,27 @@ end
 
 sendNotify("Army Script", "Press G to toggle Panel | F3 to Terminate")
 print("Army Soldier loaded - Press G for panel")
+
+local function setupInfiniteJump()
+    if infJumpConnection then infJumpConnection:Disconnect() end
+    infJumpConnection = UserInputService.JumpRequest:Connect(function()
+        if infJumpEnabled and isRunning then
+            local char, hum, root = getMyRig()
+            if hum and not infJumpDebounce then
+                infJumpDebounce = true
+                hum:ChangeState(Enum.HumanoidStateType.Jumping)
+                task.wait()
+                infJumpDebounce = false
+            end
+        end
+    end)
+end
+
+setupInfiniteJump()
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(1)
+    setupInfiniteJump()
+end)
 
 -- Polling loop (Main Thread)
 print("[ARMY] Starting command loop...")
@@ -4049,6 +4682,24 @@ while isRunning do
                                         end
                                     end
                                     return true
+                                elseif string.sub(action, 1, 13) == "prepare_tool " then
+                                    local params = string.sub(action, 14)
+                                    local parts = string.split(params, " ")
+                                    if #parts >= 3 then
+                                        local itemName = table.concat(parts, " ", 1, #parts - 2)
+                                        local pos1Str = parts[#parts - 1]
+                                        local pos2Str = parts[#parts]
+                                        
+                                        local p1Parts = string.split(pos1Str, ",")
+                                        local p2Parts = string.split(pos2Str, ",")
+                                        
+                                        if #p1Parts == 3 and #p2Parts == 3 then
+                                            local p1 = Vector3.new(tonumber(p1Parts[1]), tonumber(p1Parts[2]), tonumber(p1Parts[3]))
+                                            local p2 = Vector3.new(tonumber(p2Parts[1]), tonumber(p2Parts[2]), tonumber(p2Parts[3]))
+                                            startPrepareTool(itemName, p1, p2)
+                                        end
+                                    end
+                                    return true
                                 elseif string.sub(action, 1, 12) == "target_drop " then
                                     -- Format: target_drop <clientId> <name> <qty>
                                     local parts = string.split(action, " ")
@@ -4089,6 +4740,9 @@ while isRunning do
                                         Movement.walkTo(targetPos)
                                     end
                                 elseif action == "cancel" then
+                                    -- "C" key no longer cancels preparing locally, but a server-issued
+                                    -- cancel should stop everything, including prepare loops.
+                                    stopPrepare()
                                     Movement.cancelAll(false)
                                 elseif action == "jump" then
                                     if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
@@ -4227,6 +4881,24 @@ while isRunning do
                                     sendNotify("Formation", "Formation cleared")
                                 elseif action == "rejoin" then
                                     game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
+                                elseif action == "spawn" then
+                                    task.spawn(function()
+                                        local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+                                        local playButton = playerGui and playerGui:FindFirstChild("SpawnGui", true) 
+                                            and playerGui.SpawnGui:FindFirstChild("Customization", true)
+                                            and playerGui.SpawnGui.Customization:FindFirstChild("PlayButton", true)
+                                        
+                                        if playButton and playButton:IsA("TextButton") then
+                                            if firesignal then
+                                                firesignal(playButton.MouseButton1Click)
+                                                firesignal(playButton.Activated)
+                                            end
+                                            pcall(function() playButton:Activate() end)
+                                            sendNotify("Army", "Spawn button clicked")
+                                        else
+                                            sendNotify("Army", "Spawn button not found")
+                                        end
+                                    end)
                                 end
                             end)
                             if not execResult then
