@@ -546,7 +546,7 @@ end
 highlightPlayers = function()
     local highlights = {}
     for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+        if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
             local highlight = Instance.new("Highlight")
             highlight.FillColor = Color3.fromRGB(255, 255, 0)
             highlight.OutlineColor = Color3.fromRGB(255, 200, 0)
@@ -4005,7 +4005,7 @@ local function createPanel()
                             local character = target:FindFirstAncestorOfClass("Model")
                             if character then
                                 local player = Players:GetPlayerFromCharacter(character)
-                                if player and player ~= LocalPlayer then
+                                if player then
                                     local modeCmd = followMode or "Normal"
                                     local fullCmd = string.format("follow %d %s", player.UserId, modeCmd)
                                     sendCommand(fullCmd)
@@ -4182,7 +4182,7 @@ local function createPanel()
                                 local character = target:FindFirstAncestorOfClass("Model")
                                 if character then
                                     local player = Players:GetPlayerFromCharacter(character)
-                                    if player and player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+                                    if player and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
                                         updateHolographicCubes(nil, formationShape, clientCount, player.Character.HumanoidRootPart.CFrame)
                                         return
                                     end
@@ -4197,7 +4197,7 @@ local function createPanel()
                                 local character = target:FindFirstAncestorOfClass("Model")
                                 if character then
                                     local player = Players:GetPlayerFromCharacter(character)
-                                    if player and player ~= LocalPlayer then
+                                    if player then
                                         -- Calculate relative offsets for all clients
                                         local offsets = calculateFormationOffsets(formationShape, clientCount)
                                         local offsetsData = {}
