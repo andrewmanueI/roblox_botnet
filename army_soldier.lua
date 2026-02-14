@@ -1527,6 +1527,20 @@ local function fireInventoryDrop(order)
     ByteNetRemote:FireServer(b)
 end
 
+local function fireAction(actionId, entityId)
+    local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
+    if not ByteNetRemote then return end
+    
+    -- Create 6-byte buffer: [0][packetID][u32(entityID)]
+    local b = buffer.create(6)
+    buffer.writeu8(b, 0, 0)   -- Namespace 0
+    buffer.writeu8(b, 1, actionId) -- Packet ID (e.g. 17 for Hit)
+    buffer.writeu32(b, 2, entityId) -- Target Entity ID
+    
+    ByteNetRemote:FireServer(b)
+end
+
+
 local function getInventoryReport(query)
     local results = {}
     local inventoryList = LocalPlayer.PlayerGui:FindFirstChild("MainGui", true)
@@ -2675,8 +2689,6 @@ startFarmingTarget = function(targetPos)
     isFarming = true
     
     task.spawn(function()
-        local targetObject = nil
-        
         local function getClosestPointOnPart(part, point)
             local partCFrame = part.CFrame
             local size = part.Size
@@ -2705,17 +2717,16 @@ startFarmingTarget = function(targetPos)
             return nil
         end
         
-        targetObject = findTarget()
+        local targetObject = findTarget()
         if not targetObject then
             sendNotify("Farm", "Target not found at position")
             isFarming = false
             return
         end
         
-        local lastPos = nil
-        local lastMoveTime = os.clock()
         local swingDelay = 0.05
         local lastSwing = 0
+        local lastMoveToCall = 0
         
         while isRunning and myToken == farmToken do
             if not targetObject or not targetObject.Parent then
@@ -2724,30 +2735,29 @@ startFarmingTarget = function(targetPos)
             end
             
             local char, humanoid, root = getMyRig()
-            if not char or not root then break end
+            if not (char and root) then break end
             
             local currentPos = root.Position
             local targetPart = targetObject:IsA("BasePart") and targetObject or (targetObject:IsA("Model") and targetObject.PrimaryPart)
             if not targetPart then break end
             
             local closestWorld = getClosestPointOnPart(targetPart, currentPos)
-            local dist2D = (Vector3.new(currentPos.X, 0, currentPos.Z) - Vector3.new(closestWorld.X, 0, closestWorld.Z)).Magnitude
+            local dist2D = (Vector2.new(currentPos.X, currentPos.Z) - Vector2.new(closestWorld.X, closestWorld.Z)).Magnitude
             
             if dist2D > 6 then
-                Movement.walkTo(targetPart.Position)
-                
-                if not lastPos or (currentPos - lastPos).Magnitude > 1 then
-                    lastPos = currentPos
-                    lastMoveTime = os.clock()
-                elseif os.clock() - lastMoveTime > 2 then
-                    sendNotify("Farm", "Soldier stuck - cancelling farm")
-                    stopFarming()
-                    break
+                -- Only call walkTo if we aren't already moving there or periodically to refresh
+                if moveTarget ~= targetPart.Position or os.clock() - lastMoveToCall > 2 then
+                    lastMoveToCall = os.clock()
+                    Movement.walkTo(targetPart.Position)
                 end
             else
-                stopGotoWalk()
-                lastPos = currentPos
-                lastMoveTime = os.clock()
+                -- In range, stop moving and hit
+                if moveTarget then
+                    stopGotoWalk()
+                end
+                
+                -- Look at the target
+                root.CFrame = CFrame.new(root.Position, Vector3.new(closestWorld.X, root.Position.Y, closestWorld.Z))
                 
                 if os.clock() - lastSwing >= swingDelay then
                     local entityID = targetObject:GetAttribute("EntityID")
@@ -2762,9 +2772,11 @@ startFarmingTarget = function(targetPos)
         
         if myToken == farmToken then
             isFarming = false
+            stopGotoWalk()
         end
     end)
 end
+
 
 
 local function showFarmMenu()
