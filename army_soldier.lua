@@ -184,7 +184,18 @@ task.spawn(function()
                     -- Ignore your own character (hum.Parent) so we don't "hit our leg".
                     local check1 = workspace:FindPartOnRay(Ray.new(origin1, dir), hum.Parent)
                     local check2 = workspace:FindPartOnRay(Ray.new(origin2, dir), hum.Parent)
-                    if (check1 and check1.CanCollide) or (check2 and check2.CanCollide) then
+                    
+                    local function isValidHit(hit)
+                        if not hit or not hit.CanCollide then return false end
+                        -- Ignore players
+                        local model = hit:FindFirstAncestorOfClass("Model")
+                        if model and Players:GetPlayerFromCharacter(model) then
+                            return false
+                        end
+                        return true
+                    end
+                    
+                    if isValidHit(check1) or isValidHit(check2) then
                         hum.Jump = true
                     end
                 end
