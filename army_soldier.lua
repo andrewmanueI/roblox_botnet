@@ -187,9 +187,9 @@ task.spawn(function()
                     
                     local function isValidHit(hit)
                         if not hit or not hit.CanCollide then return false end
-                        -- Ignore players
+                        -- Ignore players by name (direct name check, not display name)
                         local model = hit:FindFirstAncestorOfClass("Model")
-                        if model and Players:GetPlayerFromCharacter(model) then
+                        if model and Players:FindFirstChild(model.Name) then
                             return false
                         end
                         return true
