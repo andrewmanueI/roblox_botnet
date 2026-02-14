@@ -184,7 +184,7 @@ task.spawn(function()
                     -- Ignore your own character (hum.Parent) so we don't "hit our leg".
                     local check1 = workspace:FindPartOnRay(Ray.new(origin1, dir), hum.Parent)
                     local check2 = workspace:FindPartOnRay(Ray.new(origin2, dir), hum.Parent)
-                    if check1 or check2 then
+                    if (check1 and check1.CanCollide) or (check2 and check2.CanCollide) then
                         hum.Jump = true
                     end
                 end
@@ -200,17 +200,28 @@ GuiService.ErrorMessageChanged:Connect(function()
 end)
 
 
--- Persistent WalkSpeed enforcement: keep it at 16.
-task.spawn(function()
-    while isRunning do
-        task.wait(0.5)
-        local char = LocalPlayer.Character
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if hum and hum.WalkSpeed ~= 16 then
+-- Robust WalkSpeed enforcement (16)
+local wsConnections = {}
+local function setupWalkSpeedEnforcement(char)
+    local hum = char:WaitForChild("Humanoid", 5)
+    if not hum then return end
+    
+    local function enforce()
+        if hum.WalkSpeed ~= 16 then
             hum.WalkSpeed = 16
         end
     end
-end)
+    
+    enforce()
+    if wsConnections.wsLoop then wsConnections.wsLoop:Disconnect() end
+    wsConnections.wsLoop = hum:GetPropertyChangedSignal("WalkSpeed"):Connect(enforce)
+end
+
+if LocalPlayer.Character then
+    setupWalkSpeedEnforcement(LocalPlayer.Character)
+end
+table.insert(connections, LocalPlayer.CharacterAdded:Connect(setupWalkSpeedEnforcement))
+
 
 
 local function toggleClicking(state)
