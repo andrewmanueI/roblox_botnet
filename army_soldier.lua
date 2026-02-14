@@ -5025,17 +5025,37 @@ while isRunning do
                                             playButton = findPlayButton()
                                         end
                                         
-                                        if playButton and playButton:IsA("TextButton") then
-                                            if firesignal then
-                                                firesignal(playButton.MouseButton1Click)
-                                                firesignal(playButton.Activated)
+                                        if playButton and playButton.AbsolutePosition then
+                                            -- Calculate center position of the button
+                                            local center = playButton.AbsolutePosition + (playButton.AbsoluteSize / 2)
+                                            
+                                            -- Use GuiService to find the actual topmost object at this screen position
+                                            -- This ensures we click through overlays or handles renamed/recreated buttons
+                                            local GuiService = game:GetService("GuiService")
+                                            local objects = GuiService:GetGuiObjectsAtPosition(center.X, center.Y)
+                                            
+                                            local target = nil
+                                            for _, obj in ipairs(objects) do
+                                                if obj:IsA("GuiButton") and obj.Visible then
+                                                    target = obj
+                                                    break
+                                                end
                                             end
-                                            pcall(function() playButton:Activate() end)
-                                            sendNotify("Army", "Spawn button triggered")
+                                            
+                                            -- Fallback to the original playButton if no topmost button found
+                                            local clickTarget = target or playButton
+                                            
+                                            if firesignal then
+                                                firesignal(clickTarget.MouseButton1Click)
+                                                firesignal(clickTarget.Activated)
+                                            end
+                                            pcall(function() clickTarget:Activate() end)
+                                            sendNotify("Army", "Spawn triggered via Z-index click")
                                         else
-                                            sendNotify("Army", "Spawn button not found")
+                                            sendNotify("Army", "Spawn button coordinates not found")
                                         end
                                     end)
+
 
                                 end
                             end)
