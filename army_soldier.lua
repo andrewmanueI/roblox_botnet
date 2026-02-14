@@ -440,6 +440,7 @@ local function initializeByteNetMap()
                 ByteNetMap.SwingTool = p.SwingTool or ByteNetMap.SwingTool
                 ByteNetMap.DropBagItem = p.DropBagItem or ByteNetMap.DropBagItem
                 ByteNetMap.UseBagItem = p.UseBagItem or ByteNetMap.UseBagItem
+                ByteNetMap.Voodoo = p.Voodoo or ByteNetMap.Voodoo
                 print("[BYTENET] Map updated from BytenetStorage")
                 return true
             end
@@ -460,6 +461,7 @@ local function initializeByteNetMap()
                 ByteNetMap.SwingTool = p.SwingTool or ByteNetMap.SwingTool
                 ByteNetMap.DropBagItem = p.DropBagItem or ByteNetMap.DropBagItem
                 ByteNetMap.UseBagItem = p.UseBagItem or ByteNetMap.UseBagItem
+                ByteNetMap.Voodoo = p.Voodoo or ByteNetMap.Voodoo
                 print("[BYTENET] Map updated from ByteNet Modules")
                 return true
             end
@@ -1537,13 +1539,13 @@ local function fireVoodoo(targetPos)
     if not ByteNetRemote then return end
     
     for i = 1, 3 do
-    -- Create 14-byte buffer: [0][10][f32][f32][f32]
-    local b = buffer.create(14)
-    buffer.writeu8(b, 0, ByteNetMap.Namespace)   -- Namespace
-    buffer.writeu8(b, 1, ByteNetMap.Voodoo)  -- Packet ID
-    buffer.writef32(b, 2, targetPos.X)
-    buffer.writef32(b, 6, targetPos.Y)
-    buffer.writef32(b, 10, targetPos.Z)
+    -- Create 13-byte buffer: [ID][f32][f32][f32]
+    -- Note: Voodoo typically omits the Namespace byte
+    local b = buffer.create(13)
+    buffer.writeu8(b, 0, ByteNetMap.Voodoo)  -- Packet ID
+    buffer.writef32(b, 1, targetPos.X)
+    buffer.writef32(b, 5, targetPos.Y)
+    buffer.writef32(b, 9, targetPos.Z)
     
     -- Fire the buffer object DIRECTLY
     ByteNetRemote:FireServer(b)
