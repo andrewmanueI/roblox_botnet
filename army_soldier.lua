@@ -4024,6 +4024,17 @@ local function createPanel()
                 end
             },
             {
+                Text = "Follow Commander",
+                Color = Color3.fromRGB(150, 255, 150),
+                Callback = function()
+                    local modeCmd = followMode or "Normal"
+                    local fullCmd = string.format("follow %d %s", LocalPlayer.UserId, modeCmd)
+                    sendCommand(fullCmd)
+                    sendNotify("Following", "Commander (" .. modeCmd .. ")")
+                    followTargetUserId = LocalPlayer.UserId
+                end
+            },
+            {
                 Text = "Stop Following",
                 Color = Color3.fromRGB(255, 100, 100),
                 Callback = function()
@@ -4374,7 +4385,7 @@ local function createPanel()
 
     -- Booga Booga Drawer
     local boogaDrawer = nil
-    if game.PlaceId == 11729688377 then
+    if game.PlaceId == 11729688377 or game.PlaceId == 11879754496 then
         boogaDrawer = createDrawer({
             Title = "Booga Booga",
             Description = "Booga Booga special actions",
