@@ -218,9 +218,11 @@ const server = http.createServer((req, res) => {
         req.on('data', chunk => { body += chunk.toString(); });
         req.on('end', () => {
             let clientId;
+            let isCommander = false;
             try {
                 const data = body ? JSON.parse(body) : {};
                 clientId = data.name || data.displayName || generateClientId();
+                isCommander = !!data.isCommander;
             } catch (e) {
                 clientId = generateClientId();
             }
@@ -231,9 +233,9 @@ const server = http.createServer((req, res) => {
                 lastSeen: Date.now(),
                 lastCommandId: 0,
                 executedCommands: new Set(),
-                isCommander: !!data.isCommander
+                isCommander: isCommander
             });
-            console.log(`[REGISTER] New client: ${clientId} (Commander: ${!!data.isCommander})`);
+            console.log(`[REGISTER] New client: ${clientId} (Commander: ${isCommander})`);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ clientId }));
         });
