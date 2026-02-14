@@ -82,7 +82,7 @@ local function endForceAutoJump()
     autoJumpForceCount = math.max(0, autoJumpForceCount - 1)
 end
 local gotoWalkToken = 0 -- increments to cancel any active goto walk loop
-local debugFollowCommands = true -- When true, commander will also execute server commands.
+local debugFollowCommands = false -- When true, commander will also execute server commands.
 local observeServerCommands = true -- When true, commander shows a notification when an order is received.
 local autoResendIfNotObserved = true -- If true, commander will re-send commands that don't come back from server.
 local AUTO_RESEND_TIMEOUT = 1.5 -- seconds to wait for the command to show up via polling before re-sending
