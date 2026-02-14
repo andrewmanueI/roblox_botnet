@@ -5,6 +5,8 @@ local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TeleportService = game:GetService("TeleportService")
+local GuiService = game:GetService("GuiService")
 
 -- Forward declarations
 -- Forward declarations
@@ -190,6 +192,13 @@ task.spawn(function()
         end
     end
 end)
+
+-- Auto-Rejoin logic: Rejoin on error or disconnect
+GuiService.ErrorMessageChanged:Connect(function()
+    print("[ARMY] Error detected, rejoining...")
+    TeleportService:Teleport(game.PlaceId, LocalPlayer)
+end)
+
 
 -- Persistent WalkSpeed enforcement: keep it at 16.
 task.spawn(function()
@@ -5005,58 +5014,21 @@ while isRunning do
                                 elseif action == "spawn" then
                                     task.spawn(function()
                                         local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
-                                        if not playerGui then return end
+                                        local playButton = playerGui and playerGui:FindFirstChild("SpawnGui", true) 
+                                            and playerGui.SpawnGui:FindFirstChild("Customization", true)
+                                            and playerGui.SpawnGui.Customization:FindFirstChild("PlayButton", true)
                                         
-                                        local function findPlayButton()
-                                            -- Look for SpawnGui first
-                                            local spawnGui = playerGui:FindFirstChild("SpawnGui", true)
-                                            if spawnGui then
-                                                return spawnGui:FindFirstChild("PlayButton", true) or spawnGui:FindFirstChild("Play", true)
-                                            end
-                                            -- Fallback: Search all of PlayerGui for a PlayButton
-                                            return playerGui:FindFirstChild("PlayButton", true) or playerGui:FindFirstChild("Play", true)
-                                        end
-
-                                        local playButton = findPlayButton()
-                                        
-                                        -- Retry once after a small delay if not found (UI might be loading)
-                                        if not playButton then
-                                            task.wait(0.5)
-                                            playButton = findPlayButton()
-                                        end
-                                        
-                                        if playButton and playButton.AbsolutePosition then
-                                            -- Calculate center position of the button
-                                            local center = playButton.AbsolutePosition + (playButton.AbsoluteSize / 2)
-                                            
-                                            -- Use GuiService to find the actual topmost object at this screen position
-                                            -- This ensures we click through overlays or handles renamed/recreated buttons
-                                            local GuiService = game:GetService("GuiService")
-                                            local objects = GuiService:GetGuiObjectsAtPosition(center.X, center.Y)
-                                            
-                                            local target = nil
-                                            for _, obj in ipairs(objects) do
-                                                if obj:IsA("GuiButton") and obj.Visible then
-                                                    target = obj
-                                                    break
-                                                end
-                                            end
-                                            
-                                            -- Fallback to the original playButton if no topmost button found
-                                            local clickTarget = target or playButton
-                                            
+                                        if playButton and playButton:IsA("TextButton") then
                                             if firesignal then
-                                                firesignal(clickTarget.MouseButton1Click)
-                                                firesignal(clickTarget.Activated)
+                                                firesignal(playButton.MouseButton1Click)
+                                                firesignal(playButton.Activated)
                                             end
-                                            pcall(function() clickTarget:Activate() end)
-                                            sendNotify("Army", "Spawn triggered via Z-index click")
+                                            pcall(function() playButton:Activate() end)
+                                            sendNotify("Army", "Spawn button clicked")
                                         else
-                                            sendNotify("Army", "Spawn button coordinates not found")
+                                            sendNotify("Army", "Spawn button not found")
                                         end
                                     end)
-
-
                                 end
                             end)
                             if not execResult then
