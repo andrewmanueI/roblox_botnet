@@ -1618,21 +1618,27 @@ local function updateHolographicCubes(position, shape, clientCount, baseCFrame)
     createHolographicCubes(position, shape, clientCount, baseCFrame)
 end
 
-local function fireVoodoo(targetPos)
+local function fireVoodoo(targetPos, count)
     local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
     if not ByteNetRemote then return end
     
-    -- Create 14-byte buffer: [0][11][f32][f32][f32]
-    -- Packet ID 11 per user change.
-    local b = buffer.create(14)
-    buffer.writeu8(b, 0, 0)   -- Namespace 0
-    buffer.writeu8(b, 1, 11)  -- Packet ID 11
-    buffer.writef32(b, 2, targetPos.X)
-    buffer.writef32(b, 6, targetPos.Y)
-    buffer.writef32(b, 10, targetPos.Z)
-    
-    -- Fire the buffer object DIRECTLY once
-    ByteNetRemote:FireServer(b)
+    local fireCount = tonumber(count) or 1
+    for i = 1, fireCount do
+        -- Create 14-byte buffer: [0][11][f32][f32][f32]
+        -- Packet ID 11 per user change.
+        local b = buffer.create(14)
+        buffer.writeu8(b, 0, 0)   -- Namespace 0
+        buffer.writeu8(b, 1, 11)  -- Packet ID 11
+        buffer.writef32(b, 2, targetPos.X)
+        buffer.writef32(b, 6, targetPos.Y)
+        buffer.writef32(b, 10, targetPos.Z)
+        
+        -- Fire the buffer object DIRECTLY
+        ByteNetRemote:FireServer(b)
+        if fireCount > 1 then
+            task.wait(0.05) -- Small delay between burst fires
+        end
+    end
 end
 
 fireEquip = function(slot)
@@ -4658,20 +4664,30 @@ local function createPanel()
                     Text = "Auto Voodoo",
                     Color = Color3.fromRGB(200, 100, 255),
                     Callback = function()
-                        sendNotify("Auto Voodoo", "Click to fire voodoo (Remaining: 3)")
+                        sendNotify("Auto Voodoo", "Tap ground to fire (Hold F for Burst)")
                         local clicks = 0
                         setPendingClick(Mouse.Button1Down:Connect(function()
                             if Mouse.Hit then
-                                clicks = clicks + 1
+                                local isBurst = UserInputService:IsKeyDown(Enum.KeyCode.F)
                                 local targetPos = Mouse.Hit.Position
-                                local voodooCmd = string.format("voodoo %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
-                                sendCommand(voodooCmd)
+                                local coordsStr = string.format("%.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
                                 
-                                if clicks < 3 then
-                                    sendNotify("Voodoo", string.format("Fired %d/3 locations", clicks))
-                                else
-                                    sendNotify("Voodoo", "Fired 3/3 locations - Selection finished")
+                                if isBurst then
+                                    -- Burst mode: sends "voodoo burst coord,coord,coord"
+                                    sendCommand("voodoo burst " .. coordsStr)
+                                    sendNotify("Voodoo", "Fired 3-shot burst - Selection finished")
                                     cancelPendingClick()
+                                else
+                                    -- Precision mode: sends "voodoo single coord,coord,coord"
+                                    clicks = clicks + 1
+                                    sendCommand("voodoo single " .. coordsStr)
+                                    
+                                    if clicks < 3 then
+                                        sendNotify("Voodoo", string.format("Fired %d/3 locations", clicks))
+                                    else
+                                        sendNotify("Voodoo", "Fired 3/3 locations - Selection finished")
+                                        cancelPendingClick()
+                                    end
                                 end
                             end
                         end), nil)
@@ -5105,11 +5121,18 @@ while isRunning do
                                         sendNotify("Formation", "Following " .. (userIdStr or "leader") .. " in " .. formationShape)
                                     end
                                 elseif string.sub(action, 1, 7) == "voodoo " then
-                                    local coords = string.split(string.sub(action, 8), ",")
-                                    if #coords == 3 then
-                                        local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
-                                        fireVoodoo(targetPos)
-                                        print("[VOODOO] Fired at " .. tostring(targetPos))
+                                    -- Format: voodoo <single|burst> <x,y,z>
+                                    local payload = string.sub(action, 8)
+                                    local mode, coordsStr = string.match(payload, "^(%S+)%s+(.+)$")
+                                    
+                                    if mode and coordsStr then
+                                        local coords = string.split(coordsStr, ",")
+                                        if #coords == 3 then
+                                            local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
+                                            local count = (mode == "burst") and 3 or 1
+                                            fireVoodoo(targetPos, count)
+                                            print("[VOODOO] " .. mode .. " fired at " .. tostring(targetPos))
+                                        end
                                     end
                                 elseif string.sub(action, 1, 6) == "equip " then
                                     local slot = tonumber(string.sub(action, 7))
