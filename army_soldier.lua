@@ -1626,7 +1626,7 @@ local function fireVoodoo(targetPos)
         -- Create 14-byte buffer: [0][10][f32][f32][f32]
         local b = buffer.create(14)
         buffer.writeu8(b, 0, 0)   -- Namespace 0
-        buffer.writeu8(b, 1, 10)  -- Packet ID 10
+        buffer.writeu8(b, 1, 11)  -- Packet ID 10
         buffer.writef32(b, 2, targetPos.X)
         buffer.writef32(b, 6, targetPos.Y)
         buffer.writef32(b, 10, targetPos.Z)
