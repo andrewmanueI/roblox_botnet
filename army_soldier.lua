@@ -4894,7 +4894,7 @@ while isRunning do
                     currentPollRate = MIN_POLL_RATE
 
                     task.spawn(function()
-                        -- By default, the commander does NOT obey server-issued commands..
+                        -- By default, the commander does NOT obey server-issued commands.
                         -- Enable `debugFollowCommands` if you want the commander to follow commands too.
                         local shouldExecute = (action ~= "wait") and (not isCommander or debugFollowCommands)
 
