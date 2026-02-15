@@ -47,6 +47,48 @@ local gotoDummyConnection = nil
 local autoJumpEnabled = false
 local autoJumpForceCount = 0 -- temporary override while slide/walk movement is active
 
+-- Packet IDs - Populated dynamically at runtime from ByteNet
+local PacketIds = {
+    Pickup = nil,           -- uint32 packet
+    VoodooSpell = nil,       -- vec3 packet
+    EquipTool = nil,        -- uint8 packet
+    Retool = nil,           -- uint8 packet (inventory store)
+    UseBagItem = nil,       -- uint16 packet
+    DropBagItem = nil,       -- uint16 packet
+    SwingTool = nil,        -- array packet
+}
+
+-- Initialize all packet IDs dynamically
+local function initPacketIds()
+    local ok, boogaData = pcall(function()
+        local ByteNetStorage = ReplicatedStorage:FindFirstChild("ByteNetStorage", true)
+        if not ByteNetStorage then return nil end
+
+        local boogaValue = ByteNetStorage:FindFirstChild("booga")
+        if not boogaValue then return nil end
+
+        return boogaValue.Value
+    end)
+
+    if ok and boogaData then
+        -- Populate table from boogaData.packets
+        for name, id in pairs(boogaData.packets) do
+            if PacketIds[name] ~= nil then
+                PacketIds[name] = id
+            end
+        end
+        print("[PACKET IDS] Initialized:")
+        for name, id in pairs(PacketIds) do
+            if id then print("  " .. name .. " = " .. id) end
+        end
+    else
+        error("[PACKET IDS] Failed to read dynamic packet IDs. ByteNetStorage.booga.Value not accessible.")
+    end
+end
+
+-- Call initialization immediately
+initPacketIds()
+
 local function isAutoJumpActive()
     return autoJumpEnabled or (autoJumpForceCount > 0) or (followConnection ~= nil)
 end
@@ -414,27 +456,13 @@ local function updateServerConfig(newConfig)
 end
 
 -- PICKUP LOGIC --
-local pickupPacketId = 213 -- Fallback
 
 local function getPickupPacketId()
-    local ok, result = pcall(function()
-        local ByteNetModule = ReplicatedStorage:FindFirstChild("Modules", true) and ReplicatedStorage.Modules:FindFirstChild("ByteNet")
-        if not ByteNetModule then return nil end
-        
-        local Replicated = ByteNetModule:FindFirstChild("replicated")
-        local values = Replicated and Replicated:FindFirstChild("values")
-        if not values then return nil end
-        
-        local Values = require(values)
-        local boogaData = Values.access("booga"):read()
-        return boogaData and boogaData.packets and boogaData.packets.Pickup
-    end)
-    if ok and result then
-        pickupPacketId = result
-        print("[PICKUP] Dynamic Packet ID found: " .. pickupPacketId)
-    else
-        warn("[PICKUP] Using fallback Packet ID: " .. pickupPacketId)
+    if PacketIds.Pickup then
+        print("[PICKUP] Dynamic Packet ID found: " .. PacketIds.Pickup)
+        return true
     end
+    error("[PICKUP] Packet ID not found in PacketIds table.")
 end
 
 local function firePickup(item)
@@ -457,7 +485,7 @@ local function firePickup(item)
     -- Create 6-byte buffer: [0][packetID][u32(entityID)]
     local b = buffer.create(6)
     buffer.writeu8(b, 0, 0)
-    buffer.writeu8(b, 1, pickupPacketId)
+    buffer.writeu8(b, 1, PacketIds.Pickup)
     buffer.writeu32(b, 2, entityID)
     
     ByteNetRemote:FireServer(b)
@@ -1625,10 +1653,10 @@ local function fireVoodoo(targetPos, count)
     local fireCount = tonumber(count) or 1
     for i = 1, fireCount do
         -- Create 14-byte buffer: [0][11][f32][f32][f32]
-        -- Packet ID 11 per user change.
+        -- VoodooSpell packet ID.
         local b = buffer.create(14)
         buffer.writeu8(b, 0, 0)   -- Namespace 0
-        buffer.writeu8(b, 1, 11)  -- Packet ID 11
+        buffer.writeu8(b, 1, PacketIds.VoodooSpell)
         buffer.writef32(b, 2, targetPos.X)
         buffer.writef32(b, 6, targetPos.Y)
         buffer.writef32(b, 10, targetPos.Z)
@@ -1645,10 +1673,10 @@ fireEquip = function(slot)
     local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
     if not ByteNetRemote then return end
     
-    -- Create 3-byte buffer: [0][191][u8(slot)]
+    -- Create 3-byte buffer: [0][EquipTool][u8(slot)]
     local b = buffer.create(3)
     buffer.writeu8(b, 0, 0)   -- Namespace 0
-    buffer.writeu8(b, 1, 191)  -- Packet ID 191 (Equip/Unequip)
+    buffer.writeu8(b, 1, PacketIds.EquipTool)  -- EquipTool packet
     buffer.writeu8(b, 2, slot) -- Slot index
     
     -- Fire the buffer object DIRECTLY
@@ -1659,10 +1687,10 @@ local function fireInventoryStore(slot)
     local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
     if not ByteNetRemote then return end
     
-    -- Create 3-byte buffer: [0][209][u8(slot)]
+    -- Create 3-byte buffer: [0][Retool][u8(slot)]
     local b = buffer.create(3)
     buffer.writeu8(b, 0, 0)   -- Namespace 0
-    buffer.writeu8(b, 1, 209)  -- Packet ID 209 (Retool/Inventory Store)
+    buffer.writeu8(b, 1, PacketIds.Retool)  -- Retool packet
     buffer.writeu8(b, 2, slot) -- Slot index
     
     ByteNetRemote:FireServer(b)
@@ -1672,11 +1700,10 @@ fireInventoryUse = function(order)
     local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
     if not ByteNetRemote then return end
     
-    -- Create 4-byte buffer: [0][43][u16(order)]
-    -- Packet 43: UseBagItem
+    -- Create 4-byte buffer: [0][UseBagItem][u16(order)]
     local b = buffer.create(4)
     buffer.writeu8(b, 0, 0)   -- Namespace 0
-    buffer.writeu8(b, 1, 43)  -- Packet ID 43
+    buffer.writeu8(b, 1, PacketIds.UseBagItem)  -- UseBagItem packet
     buffer.writeu16(b, 2, order) -- Index (u16 little-endian)
     
     ByteNetRemote:FireServer(b)
@@ -1686,11 +1713,10 @@ local function fireInventoryDrop(order)
     local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
     if not ByteNetRemote then return end
     
-    -- Create 4-byte buffer: [0][74][u16(order)]
-    -- Packet 74: DropBagItem
+    -- Create 4-byte buffer: [0][DropBagItem][u16(order)]
     local b = buffer.create(4)
     buffer.writeu8(b, 0, 0)   -- Namespace 0
-    buffer.writeu8(b, 1, 74)  -- Packet ID 74
+    buffer.writeu8(b, 1, PacketIds.DropBagItem)  -- DropBagItem packet
     buffer.writeu16(b, 2, order) -- Index (u16 little-endian)
     
     ByteNetRemote:FireServer(b)
@@ -1699,12 +1725,12 @@ end
 local function fireAction(actionId, entityId)
     local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
     if not ByteNetRemote then return end
-    
-    if actionId == 17 then
-        -- Packet 17 (SwingTool) structure: [0][17][count_u16][entityId_u32]
+
+    -- SwingTool uses array structure: [0][id][count_u16][entityId_u32...]
+    if actionId == PacketIds.SwingTool then
         local b = buffer.create(8)
         buffer.writeu8(b, 0, 0)   -- Namespace 0
-        buffer.writeu8(b, 1, 17)  -- Packet ID 17
+        buffer.writeu8(b, 1, PacketIds.SwingTool)  -- SwingTool packet
         buffer.writeu16(b, 2, 1)  -- Count (1 target)
         buffer.writeu32(b, 4, entityId) -- Target Entity ID
         ByteNetRemote:FireServer(b)
