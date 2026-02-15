@@ -1622,19 +1622,17 @@ local function fireVoodoo(targetPos)
     local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
     if not ByteNetRemote then return end
     
-    for i = 1, 3 do
-        -- Create 14-byte buffer: [0][10][f32][f32][f32]
-        local b = buffer.create(14)
-        buffer.writeu8(b, 0, 0)   -- Namespace 0
-        buffer.writeu8(b, 1, 11)  -- Packet ID 10
-        buffer.writef32(b, 2, targetPos.X)
-        buffer.writef32(b, 6, targetPos.Y)
-        buffer.writef32(b, 10, targetPos.Z)
-        
-        -- Fire the buffer object DIRECTLY
-        ByteNetRemote:FireServer(b)
-        task.wait(0.05) -- Small delay between fires for maximum impact
-    end
+    -- Create 14-byte buffer: [0][11][f32][f32][f32]
+    -- Packet ID 11 per user change.
+    local b = buffer.create(14)
+    buffer.writeu8(b, 0, 0)   -- Namespace 0
+    buffer.writeu8(b, 1, 11)  -- Packet ID 11
+    buffer.writef32(b, 2, targetPos.X)
+    buffer.writef32(b, 6, targetPos.Y)
+    buffer.writef32(b, 10, targetPos.Z)
+    
+    -- Fire the buffer object DIRECTLY once
+    ByteNetRemote:FireServer(b)
 end
 
 fireEquip = function(slot)
@@ -4660,14 +4658,21 @@ local function createPanel()
                     Text = "Auto Voodoo",
                     Color = Color3.fromRGB(200, 100, 255),
                     Callback = function()
-                        sendNotify("Auto Voodoo", "Click where you want soldiers to fire voodoo")
+                        sendNotify("Auto Voodoo", "Click to fire voodoo (Remaining: 3)")
+                        local clicks = 0
                         setPendingClick(Mouse.Button1Down:Connect(function()
                             if Mouse.Hit then
+                                clicks = clicks + 1
                                 local targetPos = Mouse.Hit.Position
                                 local voodooCmd = string.format("voodoo %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
                                 sendCommand(voodooCmd)
-                                sendNotify("Voodoo", "Soldiers firing voodoo at target")
-                                cancelPendingClick()
+                                
+                                if clicks < 3 then
+                                    sendNotify("Voodoo", string.format("Fired %d/3 locations", clicks))
+                                else
+                                    sendNotify("Voodoo", "Fired 3/3 locations - Selection finished")
+                                    cancelPendingClick()
+                                end
                             end
                         end), nil)
                     end
