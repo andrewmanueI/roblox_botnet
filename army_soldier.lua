@@ -413,63 +413,27 @@ local function updateServerConfig(newConfig)
     return success
 end
 
--- BYTENET DYNAMIC MAPPING --
-local ByteNetMap = {
-    Namespace = 0,
-    SwingTool = 17,
-    EquipTool = 191,
-    InventoryStore = 209,
-    UseBagItem = 43,
-    DropBagItem = 74,
-    Pickup = 213,
-    Voodoo = 10
-}
+-- PICKUP LOGIC --
+local pickupPacketId = 213 -- Fallback
 
-local function initializeByteNetMap()
+local function getPickupPacketId()
     local ok, result = pcall(function()
-        -- Attempt 1: Check ReplicatedStorage.BytenetStorage.booga.Value (JSON)
-        local storage = ReplicatedStorage:FindFirstChild("BytenetStorage")
-        local booga = storage and storage:FindFirstChild("booga")
-        if booga and booga:IsA("StringValue") and booga.Value ~= "" then
-            local data = HttpService:JSONDecode(booga.Value)
-            if data and data.packets then
-                local p = data.packets
-                ByteNetMap.EquipTool = p.EquipTool or ByteNetMap.EquipTool
-                ByteNetMap.InventoryStore = p.InventoryStore or ByteNetMap.InventoryStore
-                ByteNetMap.Pickup = p.Pickup or ByteNetMap.Pickup
-                ByteNetMap.SwingTool = p.SwingTool or ByteNetMap.SwingTool
-                ByteNetMap.DropBagItem = p.DropBagItem or ByteNetMap.DropBagItem
-                ByteNetMap.UseBagItem = p.UseBagItem or ByteNetMap.UseBagItem
-                ByteNetMap.Voodoo = p.Voodoo or ByteNetMap.Voodoo
-                print("[BYTENET] Map updated from BytenetStorage")
-                return true
-            end
-        end
-
-        -- Attempt 2: require(ReplicatedStorage.Modules.ByteNet.replicated.values)
         local ByteNetModule = ReplicatedStorage:FindFirstChild("Modules", true) and ReplicatedStorage.Modules:FindFirstChild("ByteNet")
-        local replicated = ByteNetModule and ByteNetModule:FindFirstChild("replicated")
-        local values = replicated and replicated:FindFirstChild("values")
-        if values then
-            local Values = require(values)
-            local boogaData = Values.access("booga"):read()
-            if boogaData and boogaData.packets then
-                local p = boogaData.packets
-                ByteNetMap.EquipTool = p.EquipTool or ByteNetMap.EquipTool
-                ByteNetMap.InventoryStore = p.InventoryStore or ByteNetMap.InventoryStore
-                ByteNetMap.Pickup = p.Pickup or ByteNetMap.Pickup
-                ByteNetMap.SwingTool = p.SwingTool or ByteNetMap.SwingTool
-                ByteNetMap.DropBagItem = p.DropBagItem or ByteNetMap.DropBagItem
-                ByteNetMap.UseBagItem = p.UseBagItem or ByteNetMap.UseBagItem
-                ByteNetMap.Voodoo = p.Voodoo or ByteNetMap.Voodoo
-                print("[BYTENET] Map updated from ByteNet Modules")
-                return true
-            end
-        end
-        return false
+        if not ByteNetModule then return nil end
+        
+        local Replicated = ByteNetModule:FindFirstChild("replicated")
+        local values = Replicated and Replicated:FindFirstChild("values")
+        if not values then return nil end
+        
+        local Values = require(values)
+        local boogaData = Values.access("booga"):read()
+        return boogaData and boogaData.packets and boogaData.packets.Pickup
     end)
-    if not ok then
-        warn("[BYTENET] Initialization failed:", result)
+    if ok and result then
+        pickupPacketId = result
+        print("[PICKUP] Dynamic Packet ID found: " .. pickupPacketId)
+    else
+        warn("[PICKUP] Using fallback Packet ID: " .. pickupPacketId)
     end
 end
 
@@ -490,11 +454,11 @@ local function firePickup(item)
     local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
     if not ByteNetRemote then return end
 
-    -- Create 5-byte buffer: [packetID][u32(entityID)]
-    -- Note: Pickup typically omits the Namespace byte
-    local b = buffer.create(5)
-    buffer.writeu8(b, 0, ByteNetMap.Pickup)
-    buffer.writeu32(b, 1, entityID)
+    -- Create 6-byte buffer: [0][packetID][u32(entityID)]
+    local b = buffer.create(6)
+    buffer.writeu8(b, 0, 0)
+    buffer.writeu8(b, 1, pickupPacketId)
+    buffer.writeu32(b, 2, entityID)
     
     ByteNetRemote:FireServer(b)
 end
@@ -513,7 +477,7 @@ local function isItemWhitelisted(name)
 end
 
 task.spawn(function()
-    initializeByteNetMap()
+    getPickupPacketId()
     
     while isRunning do
         if serverConfigs.auto_pickup then
@@ -1153,7 +1117,7 @@ local function runMoveToUntil(targetPos, opts)
 end
 
 -- Forward declarations so Movement methods can call these without accidental global lookups.
-local startGotoWalk, startGotoWalkMoveTo
+local startGotoWalk, startGotoWalkMoveTo, startGotoPathfind
 
 local Movement = {}
 
@@ -1171,6 +1135,10 @@ end
 
 function Movement.walkTo(targetPos)
     startGotoWalkMoveTo(targetPos)
+end
+
+function Movement.pathfindTo(targetPos)
+    startGotoPathfind(targetPos)
 end
 
 function Movement.tweenTo(targetPos, opts)
@@ -1371,6 +1339,122 @@ startGotoWalkMoveTo = function(targetPos, opts)
     end)
 end
 
+startGotoPathfind = function(targetPos, opts)
+    stopGotoWalk()
+    stopFollowing()
+
+    local _, humanoid, root = getMyRig()
+    if not (humanoid and root) then return end
+
+    ensureUnseated(humanoid)
+    moveTarget = targetPos
+
+    opts = opts or {}
+    local waypointStopDist = tonumber(opts.waypointStopDist) or 5
+
+    -- Cancel token shared with other "goto" movement modes (Slide/Walk).
+    -- This lets the existing Cancel ("C") behavior stop pathfinding too via stopGotoWalk().
+    local myToken = gotoWalkToken
+
+    beginForceAutoJump()
+    task.spawn(function()
+        local didCleanup = false
+        local function cleanup()
+            if didCleanup then return end
+            didCleanup = true
+            endForceAutoJump()
+        end
+
+        local ok, err = pcall(function()
+            local myChar = LocalPlayer.Character
+            local myHumanoid = myChar and myChar:FindFirstChildOfClass("Humanoid")
+            local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+            if not (myHumanoid and myRoot) then
+                return
+            end
+
+            local path = PathfindingService:CreatePath({
+                AgentRadius = 0,
+                AgentHeight = 5,
+                AgentMaxSlope = 75,
+            })
+
+            local computedOk = pcall(function()
+                path:ComputeAsync(myRoot.Position, targetPos)
+            end)
+
+            if not computedOk or myToken ~= gotoWalkToken then
+                return
+            end
+
+            if path.Status ~= Enum.PathStatus.Success then
+                -- Fallback: plain MoveTo to at least attempt movement.
+                pcall(function()
+                    myHumanoid:MoveTo(targetPos)
+                end)
+                return
+            end
+
+            local waypoints = path:GetWaypoints()
+            for _, wp in ipairs(waypoints) do
+                if not isRunning or myToken ~= gotoWalkToken then
+                    break
+                end
+
+                myChar = LocalPlayer.Character
+                myHumanoid = myChar and myChar:FindFirstChildOfClass("Humanoid")
+                myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+                if not (myHumanoid and myRoot) then
+                    break
+                end
+
+                ensureUnseated(myHumanoid)
+
+                pcall(function()
+                    myHumanoid:MoveTo(wp.Position)
+                end)
+
+                if wp.Action == Enum.PathWaypointAction.Jump then
+                    pcall(function()
+                        myHumanoid.Jump = true
+                    end)
+                end
+
+                -- Wait until we're close enough to this waypoint (or canceled).
+                while isRunning and myToken == gotoWalkToken do
+                    myChar = LocalPlayer.Character
+                    myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+                    myHumanoid = myChar and myChar:FindFirstChildOfClass("Humanoid")
+                    if not (myRoot and myHumanoid) then
+                        break
+                    end
+
+                    if myHumanoid.SeatPart then
+                        myHumanoid.Sit = false
+                    end
+
+                    local dist = (wp.Position - myRoot.Position).Magnitude
+                    if dist <= waypointStopDist then
+                        break
+                    end
+
+                    RunService.Heartbeat:Wait()
+                end
+            end
+        end)
+
+        cleanup()
+        if not ok then
+            warn("[PATHFIND] Loop error:", err)
+        end
+
+        -- Only clear movement state if we're still the active token (don't clobber a newer move).
+        if myToken == gotoWalkToken then
+            moveTarget = nil
+        end
+    end)
+end
+
 startFollowing = function(userId, mode)
     if followConnection then
         followConnection:Disconnect()
@@ -1539,28 +1623,28 @@ local function fireVoodoo(targetPos)
     if not ByteNetRemote then return end
     
     for i = 1, 3 do
-    -- Create 13-byte buffer: [ID][f32][f32][f32]
-    -- Note: Voodoo typically omits the Namespace byte
-    local b = buffer.create(13)
-    buffer.writeu8(b, 0, ByteNetMap.Voodoo)  -- Packet ID
-    buffer.writef32(b, 1, targetPos.X)
-    buffer.writef32(b, 5, targetPos.Y)
-    buffer.writef32(b, 9, targetPos.Z)
-    
-    -- Fire the buffer object DIRECTLY
-    ByteNetRemote:FireServer(b)
-    task.wait(0.05) -- Small delay between fires for maximum impact
-end
+        -- Create 14-byte buffer: [0][10][f32][f32][f32]
+        local b = buffer.create(14)
+        buffer.writeu8(b, 0, 0)   -- Namespace 0
+        buffer.writeu8(b, 1, 10)  -- Packet ID 10
+        buffer.writef32(b, 2, targetPos.X)
+        buffer.writef32(b, 6, targetPos.Y)
+        buffer.writef32(b, 10, targetPos.Z)
+        
+        -- Fire the buffer object DIRECTLY
+        ByteNetRemote:FireServer(b)
+        task.wait(0.05) -- Small delay between fires for maximum impact
+    end
 end
 
 fireEquip = function(slot)
     local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
     if not ByteNetRemote then return end
     
-    -- Create 3-byte buffer: [0][packetId][u8(slot)]
+    -- Create 3-byte buffer: [0][191][u8(slot)]
     local b = buffer.create(3)
-    buffer.writeu8(b, 0, ByteNetMap.Namespace)   -- Namespace
-    buffer.writeu8(b, 1, ByteNetMap.EquipTool)  -- Packet ID
+    buffer.writeu8(b, 0, 0)   -- Namespace 0
+    buffer.writeu8(b, 1, 191)  -- Packet ID 191 (Equip/Unequip)
     buffer.writeu8(b, 2, slot) -- Slot index
     
     -- Fire the buffer object DIRECTLY
@@ -1571,10 +1655,10 @@ local function fireInventoryStore(slot)
     local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
     if not ByteNetRemote then return end
     
-    -- Create 3-byte buffer: [0][ID][u8(slot)]
+    -- Create 3-byte buffer: [0][209][u8(slot)]
     local b = buffer.create(3)
-    buffer.writeu8(b, 0, ByteNetMap.Namespace)   -- Namespace
-    buffer.writeu8(b, 1, ByteNetMap.InventoryStore)  -- Packet ID
+    buffer.writeu8(b, 0, 0)   -- Namespace 0
+    buffer.writeu8(b, 1, 209)  -- Packet ID 209 (Retool/Inventory Store)
     buffer.writeu8(b, 2, slot) -- Slot index
     
     ByteNetRemote:FireServer(b)
@@ -1584,11 +1668,11 @@ fireInventoryUse = function(order)
     local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
     if not ByteNetRemote then return end
     
-    -- Create 4-byte buffer: [0][ID][u16(order)]
-    -- Packet: UseBagItem
+    -- Create 4-byte buffer: [0][43][u16(order)]
+    -- Packet 43: UseBagItem
     local b = buffer.create(4)
-    buffer.writeu8(b, 0, ByteNetMap.Namespace)   -- Namespace
-    buffer.writeu8(b, 1, ByteNetMap.UseBagItem)  -- Packet ID
+    buffer.writeu8(b, 0, 0)   -- Namespace 0
+    buffer.writeu8(b, 1, 43)  -- Packet ID 43
     buffer.writeu16(b, 2, order) -- Index (u16 little-endian)
     
     ByteNetRemote:FireServer(b)
@@ -1598,11 +1682,11 @@ local function fireInventoryDrop(order)
     local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
     if not ByteNetRemote then return end
     
-    -- Create 4-byte buffer: [0][ID][u16(order)]
-    -- Packet: DropBagItem
+    -- Create 4-byte buffer: [0][74][u16(order)]
+    -- Packet 74: DropBagItem
     local b = buffer.create(4)
-    buffer.writeu8(b, 0, ByteNetMap.Namespace)   -- Namespace
-    buffer.writeu8(b, 1, ByteNetMap.DropBagItem)  -- Packet ID
+    buffer.writeu8(b, 0, 0)   -- Namespace 0
+    buffer.writeu8(b, 1, 74)  -- Packet ID 74
     buffer.writeu16(b, 2, order) -- Index (u16 little-endian)
     
     ByteNetRemote:FireServer(b)
@@ -1612,18 +1696,18 @@ local function fireAction(actionId, entityId)
     local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
     if not ByteNetRemote then return end
     
-    if actionId == 17 or actionId == ByteNetMap.SwingTool then
-        -- Packet SwingTool structure: [0][ID][count_u16][entityId_u32]
+    if actionId == 17 then
+        -- Packet 17 (SwingTool) structure: [0][17][count_u16][entityId_u32]
         local b = buffer.create(8)
-        buffer.writeu8(b, 0, ByteNetMap.Namespace)   -- Namespace
-        buffer.writeu8(b, 1, ByteNetMap.SwingTool)  -- Packet ID
+        buffer.writeu8(b, 0, 0)   -- Namespace 0
+        buffer.writeu8(b, 1, 17)  -- Packet ID 17
         buffer.writeu16(b, 2, 1)  -- Count (1 target)
         buffer.writeu32(b, 4, entityId) -- Target Entity ID
         ByteNetRemote:FireServer(b)
     else
         -- Default 6-byte structure for other simple actions
         local b = buffer.create(6)
-        buffer.writeu8(b, 0, ByteNetMap.Namespace)
+        buffer.writeu8(b, 0, 0)
         buffer.writeu8(b, 1, actionId)
         buffer.writeu32(b, 2, entityId)
         ByteNetRemote:FireServer(b)
@@ -4033,6 +4117,22 @@ local function createPanel()
                 end
             },
             {
+                Text = "Goto Mouse (Pathfind)",
+                Color = Color3.fromRGB(255, 200, 150),
+                Callback = function()
+                    sendNotify("Pathfind Mode", "Click where you want soldiers to pathfind")
+                    setPendingClick(Mouse.Button1Down:Connect(function()
+                        if Mouse.Hit then
+                            local targetPos = Mouse.Hit.Position + Vector3.new(0, 3, 0)
+                            local pathCmd = string.format("pathfind %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z)
+                            sendCommand(pathCmd)
+                            sendNotify("Pathfind", "Soldiers pathfinding to location")
+                            cancelPendingClick()
+                        end
+                    end), nil)
+                end
+            },
+            {
                 Text = "Force Goto (Teleport)",
                 Color = Color3.fromRGB(255, 120, 200),
                 Callback = function()
@@ -4926,6 +5026,16 @@ while isRunning do
                                         local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
                                         print("[WALKTO] Target pos:", targetPos)
                                         Movement.walkTo(targetPos)
+                                    end
+                                elseif string.sub(action, 1, 8) == "pathfind" then
+                                    print("[PATHFIND] Received command:", action)
+                                    stopFollowing()
+                                    local coords = string.split(string.sub(action, 10), ",") -- after "pathfind "
+                                    print("[PATHFIND] Coords:", coords[1], coords[2], coords[3])
+                                    if #coords == 3 then
+                                        local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
+                                        print("[PATHFIND] Target pos:", targetPos)
+                                        Movement.pathfindTo(targetPos)
                                     end
                                 elseif action == "cancel" then
                                     -- "C" key no longer cancels preparing locally, but a server-issued
