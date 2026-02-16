@@ -766,6 +766,15 @@ wss.on('connection', (ws) => {
                     ws.send(JSON.stringify({ type: 'error', code: 'not_registered' }));
                 }
             }
+            
+            // Handle unregistration
+            else if (data.type === 'unregister') {
+                if (!clientId) return;
+                console.log(`[WS:UNREGISTER] Client ${clientId} (Requested)`);
+                clients.delete(clientId);
+                clientSockets.delete(clientId);
+                ws.close();
+            }
         } catch (e) {
             console.error(`[WS:ERROR] Failed to parse message: ${e.message}`);
         }

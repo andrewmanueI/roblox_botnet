@@ -10,9 +10,7 @@ local GuiService = game:GetService("GuiService")
 
 -- Forward declarations
 -- Forward declarations
-local highlightPlayers, clearHighlights, startFollowing, stopFollowing, startFollowingPosition, stopFollowingPosition, sendCommand, stopGotoWalk, stopFarming, stopRoute, showRouteManager, startRouteExecution, fetchRoutes, syncSaveRoute, syncDeleteRoute, walkToUntilWithin, startFarmingTarget, startPrepareTool, stopPrepare
--- Used before their definitions below; forward-declare to avoid global/nil lookups.
-local getMyRig, fireEquip, fireInventoryUse
+local highlightPlayers, clearHighlights, startFollowing, stopFollowing, startFollowingPosition, stopFollowingPosition, sendCommand, stopGotoWalk, stopFarming, stopRoute, showRouteManager, startRouteExecution, fetchRoutes, syncSaveRoute, syncDeleteRoute, walkToUntilWithin, startFarmingTarget, startPrepareTool, stopPrepare, getInventoryReport, dropItemByName, Movement, startFarmingList, terminateScript, fireVoodoo, scanAndEquip, fireInventoryStore, robustRequest, fireAction, firePickup, fireInventoryDrop, fireEquip, fireInventoryUse, findEdgePointRaycast
 local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
 
@@ -185,7 +183,7 @@ local infJumpDebounce = false
 -- Centralized Network Request Helper
 local networkRequest = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
 
-local function robustRequest(options)
+robustRequest = function(options)
     if not networkRequest then return false, nil end
     -- Retries intentionally disabled: one request attempt per call.
     local success, response = pcall(function()
@@ -463,7 +461,7 @@ end
 
 -- PICKUP LOGIC --
 
-local function firePickup(item)
+firePickup = function(item)
     if not item then return end
     -- Items can be BaseParts or Models depending on the game.
     local entityID = item:GetAttribute("EntityID")
@@ -1502,10 +1500,60 @@ local function runMoveToUntil(targetPos, opts)
     return reached, lastDist, stoppedBy
 end
 
+local function getClosestPointOnPart(part, point)
+    local partCFrame = part.CFrame
+    local size = part.Size
+    local localPoint = partCFrame:PointToObjectSpace(point)
+    local halfSize = size / 2
+    local clampedLocal = Vector3.new(
+        math.clamp(localPoint.X, -halfSize.X, halfSize.X),
+        math.clamp(localPoint.Y, -halfSize.Y, halfSize.Y),
+        math.clamp(localPoint.Z, -halfSize.Z, halfSize.Z)
+    )
+    return partCFrame:PointToWorldSpace(clampedLocal)
+end
+
+findEdgePointRaycast = function(target, fromPos)
+    local targetPart = target:IsA("BasePart") and target or (target:IsA("Model") and (target.PrimaryPart or target:FindFirstChildWhichIsA("BasePart", true)))
+    if not targetPart then 
+        return (target:IsA("Model") and target.PrimaryPart and target.PrimaryPart.Position) or (target:IsA("BasePart") and target.Position) or fromPos
+    end
+    
+    local center = targetPart.Position
+    local params = RaycastParams.new()
+    
+    -- Optimized ancestry: Include the whole model/resource tree to ensure we hit hitboxes
+    local filterRoot = target:IsA("Model") and target or target:FindFirstAncestorOfClass("Model") or target
+    params.FilterDescendantsInstances = {filterRoot}
+    params.FilterType = Enum.RaycastFilterType.Include
+    
+    local bestPoint = center
+    local minDist = math.huge
+    
+    -- Fire 10 rays at random angles from far away towards the center
+    for i = 1, 10 do
+        local angle = math.rad(math.random(0, 360))
+        local direction = Vector3.new(math.cos(angle), 0, math.sin(angle))
+        -- Standard resource hitboxes are rarely larger than 20-30 studs
+        local startPos = center + (direction * 50) 
+        local rayResult = workspace:Raycast(startPos, -direction * 50, params)
+        
+        if rayResult then
+            local p = rayResult.Position
+            local d = (p - fromPos).Magnitude
+            if d < minDist then
+                minDist = d
+                bestPoint = p
+            end
+        end
+    end
+    return bestPoint
+end
+
 -- Forward declarations so Movement methods can call these without accidental global lookups.
 local startGotoWalk, startGotoWalkMoveTo, startGotoPathfind
 
-local Movement = {}
+Movement = {}
 
 function Movement.cancelAll(isFromCommander)
     -- Reuse the existing cancel behavior, but also stop any active tween we started.
@@ -2004,7 +2052,7 @@ local function updateHolographicCubes(position, shape, clientCount, baseCFrame)
     createHolographicCubes(position, shape, clientCount, baseCFrame)
 end
 
-local function fireVoodoo(targetPos, count)
+fireVoodoo = function(targetPos, count)
     local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
     if not ByteNetRemote then return end
     
@@ -2041,7 +2089,7 @@ fireEquip = function(slot)
     ByteNetRemote:FireServer(b)
 end
 
-local function fireInventoryStore(slot)
+fireInventoryStore = function(slot)
     local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
     if not ByteNetRemote then return end
     
@@ -2067,7 +2115,7 @@ fireInventoryUse = function(order)
     ByteNetRemote:FireServer(b)
 end
 
-local function fireInventoryDrop(order)
+fireInventoryDrop = function(order)
     local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
     if not ByteNetRemote then return end
     
@@ -2080,7 +2128,7 @@ local function fireInventoryDrop(order)
     ByteNetRemote:FireServer(b)
 end
 
-local function fireAction(actionId, entityId)
+fireAction = function(actionId, entityId)
     local ByteNetRemote = ReplicatedStorage:FindFirstChild("ByteNetReliable", true) or ReplicatedStorage:FindFirstChild("ByteNet", true)
     if not ByteNetRemote then return end
 
@@ -2114,7 +2162,7 @@ end
 
 
 
-local function getInventoryReport(query)
+getInventoryReport = function(query)
     local results = {}
     local inventoryList = LocalPlayer.PlayerGui:FindFirstChild("MainGui", true)
         and LocalPlayer.PlayerGui.MainGui:FindFirstChild("RightPanel", true)
@@ -2147,7 +2195,7 @@ local function getInventoryReport(query)
     return HttpService:JSONEncode(results)
 end
 
-local function dropItemByName(itemName, quantity)
+dropItemByName = function(itemName, quantity)
     local results = {}
     local inventoryList = LocalPlayer.PlayerGui:FindFirstChild("MainGui", true)
         and LocalPlayer.PlayerGui.MainGui:FindFirstChild("RightPanel", true)
@@ -2805,7 +2853,7 @@ local function performToolbarScan(targetName)
     return nil
 end
 
-local function scanAndEquip(toolName)
+scanAndEquip = function(toolName)
     if not toolName or toolName == "" then return end
     print("[SCAN] Starting sync for tool: " .. toolName)
     
@@ -3045,7 +3093,7 @@ local function showPrepareDialog()
     end)
 end
 
-local function terminateScript()
+terminateScript = function()
     isRunning = false
     sendNotify("Army Script", "Script Terminated")
 
@@ -3092,6 +3140,19 @@ local function terminateScript()
     if infJumpConnection then
         infJumpConnection:Disconnect()
         infJumpConnection = nil
+    end
+
+    -- Close WebSocket gracefully
+    if activeWS then
+        pcall(function()
+            activeWS:Send(HttpService:JSONEncode({
+                type = "unregister",
+                clientId = clientId
+            }))
+            task.wait(0.1)
+            activeWS:Close()
+        end)
+        activeWS = nil
     end
 end
 
@@ -3262,18 +3323,6 @@ startFarmingTarget = function(targetPos, targetId)
     isFarming = true
     
     task.spawn(function()
-        local function getClosestPointOnPart(part, point)
-            local partCFrame = part.CFrame
-            local size = part.Size
-            local localPoint = partCFrame:PointToObjectSpace(point)
-            local halfSize = size / 2
-            local clampedLocal = Vector3.new(
-                math.clamp(localPoint.X, -halfSize.X, halfSize.X),
-                math.clamp(localPoint.Y, -halfSize.Y, halfSize.Y),
-                math.clamp(localPoint.Z, -halfSize.Z, halfSize.Z)
-            )
-            return partCFrame:PointToWorldSpace(clampedLocal)
-        end
 
         local function findTarget()
             -- Spatial search at the target position (radius 4)
@@ -3335,14 +3384,14 @@ startFarmingTarget = function(targetPos, targetId)
             local targetPart = targetObject:IsA("BasePart") and targetObject or (targetObject:IsA("Model") and targetObject.PrimaryPart)
             if not targetPart then break end
             
-            local closestWorld = getClosestPointOnPart(targetPart, currentPos)
-            local dist2D = (Vector2.new(currentPos.X, currentPos.Z) - Vector2.new(closestWorld.X, closestWorld.Z)).Magnitude
+            local edgePoint = findEdgePointRaycast(targetObject, currentPos)
+            local dist2D = (Vector2.new(currentPos.X, currentPos.Z) - Vector2.new(edgePoint.X, edgePoint.Z)).Magnitude
             
             if dist2D > 6 then
                 -- Only call walkTo if we aren't already moving there or periodically to refresh
-                if moveTarget ~= targetPart.Position or os.clock() - lastMoveToCall > 2 then
+                if moveTarget ~= edgePoint or os.clock() - lastMoveToCall > 2 then
                     lastMoveToCall = os.clock()
-                    Movement.walkTo(targetPart.Position)
+                    Movement.walkTo(edgePoint)
                 end
             else
                 -- In range, stop moving and hit
@@ -3351,7 +3400,7 @@ startFarmingTarget = function(targetPos, targetId)
                 end
                 
                 -- Look at the target
-                root.CFrame = CFrame.new(root.Position, Vector3.new(closestWorld.X, root.Position.Y, closestWorld.Z))
+                root.CFrame = CFrame.new(root.Position, Vector3.new(edgePoint.X, root.Position.Y, edgePoint.Z))
                 
                 if os.clock() - lastSwing >= swingDelay then
                     local entityID = targetObject:GetAttribute("EntityID")
@@ -3371,7 +3420,7 @@ startFarmingTarget = function(targetPos, targetId)
     end)
 end
 
-local function startFarmingList(targetIds)
+startFarmingList = function(targetIds)
     stopFarming()
     local myToken = farmToken
     isFarming = true
