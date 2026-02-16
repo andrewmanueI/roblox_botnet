@@ -1061,6 +1061,11 @@ local function handleActionData(data)
             elseif string.sub(action, 1, 11) == "sync_equip " then
                 local toolName = string.sub(action, 12)
                 if toolName then task.spawn(scanAndEquip, toolName) end
+            elseif string.sub(action, 1, 8) == "prepare " then
+                local toolName = string.sub(action, 9)
+                if toolName then startPrepareTool(toolName) end
+            elseif action == "stop_prepare" then
+                stopPrepare()
             elseif string.sub(action, 1, 15) == "formation_goto " then
                 local payload = string.sub(action, 16)
                 local coordsStr, shapeStr, positionsJson = string.match(payload, "^(%S+)%s+(%S+)%s+(.+)$")
@@ -1228,6 +1233,25 @@ stopFarming = function()
     farmToken = farmToken + 1
     isFarming = false
     stopGotoWalk()
+end
+
+local preparedTool = nil
+startPrepareTool = function(toolName)
+    if not toolName or toolName == "" then return end
+    print("[PREPARE] Ensuring tool is ready: " .. toolName)
+    preparedTool = toolName
+    
+    local success = scanAndEquip(toolName)
+    if success then
+        sendNotify("Prepare", "Tool '" .. toolName .. "' is ready for action")
+    else
+        sendNotify("Prepare", "Failed to find or equip '" .. toolName .. "'")
+    end
+end
+
+stopPrepare = function()
+    preparedTool = nil
+    sendNotify("Prepare", "Tool preparation released")
 end
 
 stopRoute = function()
@@ -3080,15 +3104,19 @@ scanAndEquip = function(toolName)
     
     local targetName = toolName:lower()
     
-    -- Clear current title at start of flow for fresh verification
+    -- Phase 0: Fast check - is it already equipped?
     local toolbarContainer = LocalPlayer.PlayerGui:FindFirstChild("MainGui", true)
         and LocalPlayer.PlayerGui.MainGui:FindFirstChild("Panels", true)
         and LocalPlayer.PlayerGui.MainGui.Panels:FindFirstChild("Toolbar", true)
         and LocalPlayer.PlayerGui.MainGui.Panels.Toolbar:FindFirstChild("Container", true)
     local toolbarTitle = toolbarContainer and toolbarContainer:FindFirstChild("Title", true)
-    if toolbarTitle then toolbarTitle.Text = "" end
+    
+    if toolbarTitle and toolbarTitle.Text:lower():find(targetName, 1, true) then
+        print("[SCAN] Tool already equipped (Fast check)")
+        return true
+    end
 
-    -- Phase 1: Search Inventory FIRST
+    -- Phase 1: Search Inventory
     print("[SCAN] Phase 1: Searching Inventory for: " .. toolName)
     local inventoryList = LocalPlayer.PlayerGui:FindFirstChild("MainGui", true)
         and LocalPlayer.PlayerGui.MainGui:FindFirstChild("RightPanel", true)
@@ -3102,18 +3130,10 @@ scanAndEquip = function(toolName)
                 print("[SCAN] Found in Inventory! Order: " .. order .. ". Firing UseBagItem Remote (43)")
                 fireInventoryUse(order)
                 
-                -- Wait 2 seconds and verify it's now in the toolbar
-                print("[SCAN] Waiting 2s for inventory -> toolbar move...")
-                task.wait(2)
-                print("[SCAN] Verifying toolbar placement...")
-                local verifiedSlot = performToolbarScan(targetName)
-                if verifiedSlot then
-                    print("[SCAN] Verification success: Tool now in slot " .. verifiedSlot)
-                    return true
-                else
-                    print("[SCAN] Verification failed: Tool not found in toolbar after use")
-                end
-                -- Fallthrough to toolbar scan if inventory use didn't result in equip
+                -- ARMOR FRIENDLY: Return true immediately once seen in inventory.
+                -- This handles items that disappear from lists (armor, consumables).
+                print("[SCAN] Once-seen rule: Success triggered via Inventory use")
+                return true
             end
         end
     end
