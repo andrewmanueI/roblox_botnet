@@ -9,3 +9,7 @@ Thumbs.db
 
 # Ignore Scripts
 git-shortcut.ps1
+.agent/rules/doublechecking.md
+army_soldier.lua
+.gitignore
+.agent/skills/roblox_army_protocol/SKILL.md

@@ -48,42 +48,53 @@ local autoJumpEnabled = false
 local autoJumpForceCount = 0 -- temporary override while slide/walk movement is active
 
 -- Packet IDs - Populated dynamically at runtime from ByteNet
-local PacketIds = {
-    Pickup = nil,           -- uint32 packet
-    VoodooSpell = nil,       -- vec3 packet
-    EquipTool = nil,        -- uint8 packet
-    Retool = nil,           -- uint8 packet (inventory store)
-    UseBagItem = nil,       -- uint16 packet
-    DropBagItem = nil,       -- uint16 packet
-    SwingTool = nil,        -- array packet
-}
+local PacketIds = {}
 
 -- Initialize all packet IDs dynamically
 local function initPacketIds()
-    local ok, boogaData = pcall(function()
-        local ByteNetStorage = ReplicatedStorage:FindFirstChild("ByteNetStorage", true)
-        if not ByteNetStorage then return nil end
-
-        local boogaValue = ByteNetStorage:FindFirstChild("booga")
-        if not boogaValue then return nil end
-
-        return boogaValue.Value
+    local success, boogaData = pcall(function()
+        local ByteNetModule = ReplicatedStorage:WaitForChild("Modules"):WaitForChild("ByteNet")
+        local Replicated = ByteNetModule:WaitForChild("replicated")
+        local Values = require(Replicated.values)
+        return Values.access("booga"):read()
     end)
 
-    if ok and boogaData then
-        -- Populate table from boogaData.packets
-        for name, id in pairs(boogaData.packets) do
-            if PacketIds[name] ~= nil then
+    if success and boogaData then
+        print("[PACKET IDS] Successfully read ByteNet data")
+        
+        -- Check packets table
+        if boogaData.packets then
+            print("[PACKET IDS] Found 'packets' table")
+            -- Populate table from packets: capture EVERYTHING like list_all_packets.lua does
+            for name, id in pairs(boogaData.packets) do
                 PacketIds[name] = id
             end
-        end
-        print("[PACKET IDS] Initialized:")
-        for name, id in pairs(PacketIds) do
-            if id then print("  " .. name .. " = " .. id) end
+            
+            print("[PACKET IDS] Initialized " .. indexCount(PacketIds) .. " packets.")
+            
+            -- Sort and print all packet IDs
+            local sortedPackets = {}
+            for name, id in pairs(PacketIds) do
+                table.insert(sortedPackets, {Name = name, ID = id})
+            end
+            table.sort(sortedPackets, function(a, b) return a.Name < b.Name end)
+            
+            for _, p in ipairs(sortedPackets) do
+                 print("  " .. p.Name .. " = " .. p.ID)
+            end
+        else
+            warn("[PACKET IDS] No 'packets' table found in ByteNet data!")
         end
     else
-        error("[PACKET IDS] Failed to read dynamic packet IDs. ByteNetStorage.booga.Value not accessible.")
+        warn("[PACKET IDS] Failed to read dynamic packet IDs. ByteNet not accessible.")
     end
+end
+
+-- Helper to count keys in a dictionary (for debug print above)
+function indexCount(t)
+    local c = 0
+    for _ in pairs(t) do c = c + 1 end
+    return c
 end
 
 -- Call initialization immediately
@@ -457,14 +468,6 @@ end
 
 -- PICKUP LOGIC --
 
-local function getPickupPacketId()
-    if PacketIds.Pickup then
-        print("[PICKUP] Dynamic Packet ID found: " .. PacketIds.Pickup)
-        return true
-    end
-    error("[PICKUP] Packet ID not found in PacketIds table.")
-end
-
 local function firePickup(item)
     if not item then return end
     -- Items can be BaseParts or Models depending on the game.
@@ -505,8 +508,6 @@ local function isItemWhitelisted(name)
 end
 
 task.spawn(function()
-    getPickupPacketId()
-    
     while isRunning do
         if serverConfigs.auto_pickup then
             local char = LocalPlayer.Character
@@ -575,14 +576,14 @@ end
 local function sendHeartbeat()
     if not clientId then return false end
 
-    local success = robustRequest({
+    local success, response = robustRequest({
         Url = SERVER_URL .. "/heartbeat",
         Method = "POST",
         Body = HttpService:JSONEncode({ clientId = clientId }),
         Headers = { ["Content-Type"] = "application/json" }
     })
 
-    return success
+    return success, response
 end
 
 local function acknowledgeCommand(commandId, success, errorMsg)
@@ -1733,6 +1734,16 @@ local function fireAction(actionId, entityId)
         buffer.writeu8(b, 1, PacketIds.SwingTool)  -- SwingTool packet
         buffer.writeu16(b, 2, 1)  -- Count (1 target)
         buffer.writeu32(b, 4, entityId) -- Target Entity ID
+        
+        -- DEBUG: Print buffer content (Decimal Escape Format)
+        local debugStr = ""
+        for i = 0, 7 do
+            -- Read each byte and format as "\000"
+            local byte = buffer.readu8(b, i)
+            debugStr = debugStr .. string.format("\\%03d", byte)
+        end
+        print("[SWING] Sending buffer: " .. debugStr)
+        
         ByteNetRemote:FireServer(b)
     else
         -- Default 6-byte structure for other simple actions
@@ -2888,7 +2899,7 @@ local function showPickupManager()
     refreshWhitelist()
 end
 
-startFarmingTarget = function(targetPos)
+startFarmingTarget = function(targetPos, targetId)
     stopFarming()
     local myToken = farmToken
     isFarming = true
@@ -2908,17 +2919,38 @@ startFarmingTarget = function(targetPos)
         end
 
         local function findTarget()
-            local resources = workspace:FindFirstChild("Resources")
-            if resources then
-                for _, child in ipairs(resources:GetChildren()) do
-                    local pos = child:IsA("BasePart") and child.Position or (child:IsA("Model") and child.PrimaryPart and child.PrimaryPart.Position)
-                    if pos and (pos - targetPos).Magnitude < 5 then
-                        if child:GetAttribute("EntityID") then
-                            return child
+            -- Spatial search at the target position (radius 4)
+            local overlapParams = OverlapParams.new()
+            overlapParams.FilterDescendantsInstances = {LocalPlayer.Character}
+            overlapParams.FilterType = Enum.RaycastFilterType.Exclude
+
+            local parts = workspace:GetPartBoundsInRadius(targetPos, 4, overlapParams)
+            print("[TARGET] Search at", targetPos, "Hit Parts:", #parts)
+
+            for _, part in ipairs(parts) do
+                local current = part
+                -- Walk up up to 10 levels to find the entity container
+                local depth = 0
+                while current and current ~= workspace and depth < 10 do
+                    local eid = current:GetAttribute("EntityID")
+                    if eid then
+                        -- STRICT CHECK: If a specific targetId was requested, we MUST match it.
+                        if targetId and eid ~= targetId then
+                            print("[TARGET] Skipping Entity (ID mismatch):", eid, "Expected:", targetId)
+                        else
+                            if current:IsA("Model") then
+                                print("[TARGET] Found Valid Target (Model):", current.Name, "ID:", eid)
+                                return current
+                            else
+                                print("[TARGET] Found EntityID but not a Model:", current.Name, "Class:", current.ClassName)
+                            end
                         end
                     end
+                    current = current.Parent
+                    depth = depth + 1
                 end
             end
+            print("[TARGET] No valid target found in radius")
             return nil
         end
         
@@ -2966,19 +2998,130 @@ startFarmingTarget = function(targetPos)
                 
                 if os.clock() - lastSwing >= swingDelay then
                     local entityID = targetObject:GetAttribute("EntityID")
-                    if entityID then
-                        fireAction(17, entityID)
+                    if entityID and PacketIds.SwingTool then
+                        fireAction(PacketIds.SwingTool, entityID)
                         lastSwing = os.clock()
                     end
                 end
             end
-            task.wait(0.1)
+            task.wait()
         end
         
         if myToken == farmToken then
             isFarming = false
             stopGotoWalk()
         end
+    end)
+end
+
+local function startFarmingList(targetIds)
+    stopFarming()
+    local myToken = farmToken
+    isFarming = true
+    
+    task.spawn(function()
+        for _, id in ipairs(targetIds) do
+            if not isFarming or myToken ~= farmToken then break end
+            
+            -- Find the target object first to get its position
+            local targetObject = nil
+            -- We need a way to find object by ID globally or assume it's streamed in.
+            -- We can reuse the findTarget logic but we need to search broadly.
+            -- For now, we rely on the soldier searching when they get the command.
+            -- Actually, startFarmingTarget takes a pos... we might need the pos for each target.
+            -- The protocol `farm_targets_list` should probably ideally accept positions too, 
+            -- OR the soldier just searches the whole relevant workspace for that ID.
+            
+            -- Since the user only mentioned sending IDs in the list ("farm_targets_list id1,id2"),
+            -- we have to find the object by ID.
+            -- We can scan the known resource folders.
+            
+            local function findObjectById(eid)
+                local searchLocations = {
+                    workspace, -- Direct children
+                    workspace:FindFirstChild("Resources"),
+                    workspace:FindFirstChild("Critters"),
+                    workspace:FindFirstChild("Totems"),
+                    workspace:FindFirstChild("ScavengerMounds"),
+                    workspace:FindFirstChild("Mounds"),
+                    workspace:FindFirstChild("Deployables")
+                }
+                for _, container in ipairs(searchLocations) do
+                    if container then
+                        for _, child in ipairs(container:GetChildren()) do
+                            if child:GetAttribute("EntityID") == eid then
+                                return child
+                            end
+                        end
+                    end
+                end
+                return nil
+            end
+            
+            local target = findObjectById(id)
+            if target then
+                local pos = target:IsA("BasePart") and target.Position or (target:IsA("Model") and target.PrimaryPart and target.PrimaryPart.Position)
+                if pos then
+                    -- Execute single target farm
+                    -- We need to wait for it to finish. startFarmingTarget is async/spawned.
+                    -- We need to refactor startFarmingTarget to be yieldable or just check status.
+                    
+                    -- HACK: We will just set the target and monitor it here instead of calling startFarmingTarget directly
+                    -- actually duplicating logic is bad. 
+                    -- Let's change startFarmingTarget to yield if requested? No, it spawns.
+                    
+                    -- Let's just wait until the target is gone or we are told to stop.
+                    print("[FARM LIST] Starting target:", id)
+                    
+                    targetPos = pos -- Update global targetPos if used elsewhere? 
+                    -- Actually startFarmingTarget takes pos as arg.
+                    
+                    -- We will run the farming logic for this target.
+                    -- To avoid code duplication, we can wrap startFarmingTarget's inner logic
+                    -- but for now, let's just make startFarmingTarget waitable? 
+                    -- Or simpler: Just loop here.
+                    
+                    local swingDelay = 0.05
+                    local lastSwing = 0
+                    local lastMoveToCall = 0
+                    
+                    while isFarming and myToken == farmToken and target.Parent do
+                        local char, humanoid, root = getMyRig()
+                        if not (char and root) then break end
+                        
+                        local current = target -- verify it still exists
+                        local currentPos = root.Position
+                        local targetPart = current:IsA("BasePart") and current or (current:IsA("Model") and current.PrimaryPart)
+                        if not targetPart then break end
+                        
+                        -- Simple distance check
+                        local dist = (root.Position - targetPart.Position).Magnitude
+                        
+                        if dist > 6 then
+                            if os.clock() - lastMoveToCall > 1 then
+                                lastMoveToCall = os.clock()
+                                Movement.walkTo(targetPart.Position)
+                            end
+                        else
+                            stopGotoWalk()
+                            -- Look and Swing
+                            root.CFrame = CFrame.new(root.Position, Vector3.new(targetPart.Position.X, root.Position.Y, targetPart.Position.Z))
+                            
+                            if os.clock() - lastSwing >= swingDelay then
+                                fireAction(PacketIds.SwingTool, id)
+                                lastSwing = os.clock()
+                            end
+                        end
+                        task.wait()
+                    end
+                    print("[FARM LIST] Finished target:", id)
+                end
+            else
+                print("[FARM LIST] Could not find object with ID:", id)
+            end
+        end
+        isFarming = false
+        stopGotoWalk()
     end)
 end
 
@@ -3030,53 +3173,136 @@ local function showFarmMenu()
     close.Font = Enum.Font.GothamBold
     close.MouseButton1Click:Connect(function() screenGui:Destroy() end)
     
-    local singleBtn = Instance.new("TextButton", panel)
-    singleBtn.Size = UDim2.new(1, -20, 0, 40)
-    singleBtn.Position = UDim2.new(0, 10, 0, 60)
-    singleBtn.BackgroundColor3 = Color3.fromRGB(255, 150, 50)
-    singleBtn.Text = "Single Target"
-    singleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    singleBtn.Font = Enum.Font.GothamBold
-    Instance.new("UICorner", singleBtn)
+    local targetBtn = Instance.new("TextButton", panel)
+    targetBtn.Size = UDim2.new(1, -20, 0, 40)
+    targetBtn.Position = UDim2.new(0, 10, 0, 60)
+    targetBtn.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
+    targetBtn.Text = "Target"
+    targetBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    targetBtn.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", targetBtn)
     
-    singleBtn.MouseButton1Click:Connect(function()
+    targetBtn.MouseButton1Click:Connect(function()
         screenGui:Destroy()
-        sendNotify("Farm", "Click an object to set as army target")
-        setPendingClick(Mouse.Button1Down:Connect(function()
+        
+        local selectedTargets = {} -- Set of ID -> Model
+        local highlights = {} -- Set of ID -> Highlight Instance
+        local isAltHeld = false
+        local connection = nil
+        local inputBegan = nil
+        local inputEnded = nil
+
+        local function cleanup()
+            if connection then connection:Disconnect() end
+            if inputBegan then inputBegan:Disconnect() end
+            if inputEnded then inputEnded:Disconnect() end
+            if pendingClickConnection then pendingClickConnection:Disconnect() end
+            pendingClickConnection = nil
+            
+            for _, hl in pairs(highlights) do
+                hl:Destroy()
+            end
+            highlights = {}
+            selectedTargets = {}
+        end
+        
+        sendNotify("Farm", "Target Mode: Click to select single, HOLD ALT to select multiple.")
+
+        -- Track Alt Key
+        inputBegan = UserInputService.InputBegan:Connect(function(input, processed)
+            if input.KeyCode == Enum.KeyCode.LeftAlt or input.KeyCode == Enum.KeyCode.RightAlt then
+                isAltHeld = true
+            end
+        end)
+        
+        inputEnded = UserInputService.InputEnded:Connect(function(input, processed)
+            if input.KeyCode == Enum.KeyCode.LeftAlt or input.KeyCode == Enum.KeyCode.RightAlt then
+                isAltHeld = false
+                
+                -- ALT RELEASED: Send aggregated list if we have any
+                local idList = {}
+                for id, _ in pairs(selectedTargets) do
+                    table.insert(idList, id)
+                end
+                
+                if #idList > 0 then
+                    local cmd = table.concat(idList, ",")
+                    sendCommand("farm_targets_list " .. cmd)
+                    sendNotify("Farm", "Sent " .. #idList .. " targets via List")
+                end
+                
+                -- Clear selection after sending
+                cleanup()
+            end
+        end)
+        
+        -- Mouse Click Handler
+        connection = Mouse.Button1Down:Connect(function()
             local target = Mouse.Target
-            if target then
-                if target:IsA("Terrain") then
-                    return -- Ignore terrain, allow another click
-                end
-                
-                local resources = workspace:FindFirstChild("Resources")
-                if not (resources and target:IsDescendantOf(resources)) then
-                    sendNotify("Farm", "Invalid target (not in Resources) - cancelled")
-                    cancelPendingClick()
-                    return
-                end
-                
-                -- Find the direct child of Resources that contains the clicked part
-                local resourceModel = target
-                while resourceModel and resourceModel.Parent ~= resources do
-                    resourceModel = resourceModel.Parent
-                    if resourceModel == workspace or not resourceModel then
+            if target and not target:IsA("Terrain") then
+                -- Find valid Model target
+                local resourceModel = nil
+                local current = target
+                while current and current ~= workspace do
+                    if current:GetAttribute("EntityID") and current:IsA("Model") then
+                        resourceModel = current
                         break
                     end
+                    current = current.Parent
                 end
                 
-                if not resourceModel or resourceModel.Parent ~= resources then
-                    sendNotify("Farm", "Error: Parent resource not found - cancelled")
-                    cancelPendingClick()
-                    return
+                if resourceModel then
+                    local eid = resourceModel:GetAttribute("EntityID")
+                    
+                    if isAltHeld then
+                        -- Toggle selection
+                        if selectedTargets[eid] then
+                            -- Deselect
+                            selectedTargets[eid] = nil
+                            if highlights[eid] then
+                                highlights[eid]:Destroy()
+                                highlights[eid] = nil
+                            end
+                            -- sendNotify("Farm", "Deselected: " .. resourceModel.Name)
+                        else
+                            -- Select
+                            selectedTargets[eid] = resourceModel
+                            
+                            local hl = Instance.new("Highlight")
+                            hl.FillColor = Color3.fromRGB(255, 0, 0)
+                            hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+                            hl.FillTransparency = 0.5
+                            hl.OutlineTransparency = 0
+                            hl.Parent = resourceModel
+                            highlights[eid] = hl
+                            
+                            -- sendNotify("Farm", "Selected: " .. resourceModel.Name)
+                        end
+                    else
+                        -- No Alt: Normal Single Target Behavior (Immediate Send)
+                        local targetPos = resourceModel:IsA("BasePart") and resourceModel.Position or (resourceModel.PrimaryPart and resourceModel.PrimaryPart.Position) or target.Position
+                        
+                        -- Clear any existing multi-selection just in case
+                        cleanup() 
+                        
+                        sendCommand(string.format("farm_target %.2f,%.2f,%.2f,%d", targetPos.X, targetPos.Y, targetPos.Z, eid))
+                        sendNotify("Farm", "Targeting Single: " .. resourceModel.Name .. " (ID: " .. eid .. ")")
+                        -- cleanup() handles disconnection so we don't double click
+                    end
+                else
+                    sendNotify("Farm", "Invalid target (No Model entity)")
+                    if not isAltHeld then cleanup() end
                 end
-                
-                local targetPos = resourceModel:IsA("BasePart") and resourceModel.Position or (resourceModel:IsA("Model") and resourceModel.PrimaryPart and resourceModel.PrimaryPart.Position) or target.Position
-                sendCommand(string.format("farm_target %.2f,%.2f,%.2f", targetPos.X, targetPos.Y, targetPos.Z))
-                sendNotify("Farm", "All soldiers targeting object: " .. resourceModel.Name)
-                cancelPendingClick()
             end
-        end), nil)
+        end)
+        
+        -- Assign to global pendingClickConnection so other UI actions cancel it properly
+        setPendingClick(connection, function()
+             -- Custom cleanup callback not needed as we handle it internally, but good for safety
+             if inputBegan then inputBegan:Disconnect() end
+             if inputEnded then inputEnded:Disconnect() end
+             for _, hl in pairs(highlights) do hl:Destroy() end
+        end)
     end)
 end
 
@@ -3535,6 +3761,126 @@ showRouteManager = function()
     task.spawn(function()
         if fetchRoutes() then
             refreshRoutes()
+        end
+    end)
+end
+
+local function showWhoisDialog()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return end
+    
+    if pg:FindFirstChild("ArmyWhoisDialog") then pg.ArmyWhoisDialog:Destroy() end
+    
+    local screenGui = Instance.new("ScreenGui", pg)
+    screenGui.Name = "ArmyWhoisDialog"
+    screenGui.ResetOnSpawn = false
+    
+    local panel = Instance.new("Frame", screenGui)
+    panel.Size = UDim2.new(0, 300, 0, 400)
+    panel.Position = UDim2.new(0.5, -150, 0.5, -200)
+    panel.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+    panel.BorderSizePixel = 0
+    Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 12)
+    Instance.new("UIStroke", panel).Color = Color3.fromRGB(60, 60, 70)
+    
+    local header = Instance.new("Frame", panel)
+    header.Size = UDim2.new(1, 0, 0, 50)
+    header.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+    header.BorderSizePixel = 0
+    Instance.new("UICorner", header)
+    
+    local title = Instance.new("TextLabel", header)
+    title.Size = UDim2.new(1, -50, 1, 0)
+    title.Position = UDim2.new(0, 15, 0, 0)
+    title.BackgroundTransparency = 1
+    title.Text = "WHOIS (SERVER VIEW)"
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.TextSize = 14
+    title.Font = Enum.Font.GothamBold
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    
+    local close = Instance.new("TextButton", header)
+    close.Size = UDim2.new(0, 30, 0, 30)
+    close.Position = UDim2.new(1, -40, 0, 10)
+    close.BackgroundTransparency = 1
+    close.Text = "X"
+    close.TextColor3 = Color3.fromRGB(200, 200, 200)
+    close.TextSize = 18
+    close.Font = Enum.Font.GothamBold
+    close.MouseButton1Click:Connect(function() screenGui:Destroy() end)
+    
+    local statusLabel = Instance.new("TextLabel", panel)
+    statusLabel.Size = UDim2.new(1, -20, 0, 30)
+    statusLabel.Position = UDim2.new(0, 10, 0, 60)
+    statusLabel.BackgroundTransparency = 1
+    statusLabel.Text = "Fetching clients..."
+    statusLabel.TextColor3 = Color3.fromRGB(150, 150, 160)
+    statusLabel.TextSize = 12
+    statusLabel.Font = Enum.Font.Gotham
+    
+    local content = Instance.new("ScrollingFrame", panel)
+    content.Size = UDim2.new(1, -20, 1, -110)
+    content.Position = UDim2.new(0, 10, 0, 100)
+    content.BackgroundTransparency = 1
+    content.BorderSizePixel = 0
+    content.ScrollBarThickness = 2
+    content.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    content.Visible = false
+    
+    local list = Instance.new("UIListLayout", content)
+    list.Padding = UDim.new(0, 5)
+    
+    task.spawn(function()
+        local success, response = robustRequest({
+            Url = SERVER_URL .. "/clients",
+            Method = "GET"
+        })
+        
+        if success and response and response.Body then
+            local jsonSuccess, data = pcall(function()
+                return HttpService:JSONDecode(response.Body)
+            end)
+            
+            if jsonSuccess and data then
+                local soldiers = {}
+                local commanderCount = 0
+                for _, client in ipairs(data) do
+                    if client.isCommander then
+                        commanderCount = commanderCount + 1
+                    else
+                        table.insert(soldiers, client)
+                    end
+                end
+                
+                statusLabel.Text = string.format("Soldiers: %d | Commanders: %d", #soldiers, commanderCount)
+                statusLabel.TextColor3 = Color3.fromRGB(200, 200, 210)
+                
+                for _, soldier in ipairs(soldiers) do
+                    local row = Instance.new("Frame", content)
+                    row.Size = UDim2.new(1, 0, 0, 30)
+                    row.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+                    row.BorderSizePixel = 0
+                    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 4)
+                    
+                    local nameL = Instance.new("TextLabel", row)
+                    nameL.Size = UDim2.new(1, -10, 1, 0)
+                    nameL.Position = UDim2.new(0, 10, 0, 0)
+                    nameL.BackgroundTransparency = 1
+                    nameL.Text = soldier.id
+                    nameL.TextColor3 = (soldier.id == clientId) and Color3.fromRGB(100, 255, 150) or Color3.fromRGB(200, 200, 200)
+                    nameL.TextSize = 12
+                    nameL.Font = Enum.Font.Gotham
+                    nameL.TextXAlignment = Enum.TextXAlignment.Left
+                end
+                
+                content.Visible = true
+            else
+                statusLabel.Text = "Error decoding client data"
+                statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+            end
+        else
+            statusLabel.Text = "Failed to fetch clients"
+            statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
         end
     end)
 end
@@ -4291,6 +4637,13 @@ local function createPanel()
         Color = Color3.fromRGB(150, 120, 255),
         Buttons = {
             {
+                Text = "Whois",
+                Color = Color3.fromRGB(200, 200, 255),
+                Callback = function()
+                    showWhoisDialog()
+                end
+            },
+            {
                 Text = "Join My Server",
                 Color = Color3.fromRGB(150, 120, 255),
                 Callback = function()
@@ -4819,6 +5172,7 @@ table.insert(connections, UserInputService.InputBegan:Connect(function(input, pr
                             if pg:FindFirstChild("ArmyFarmMenu") then pg.ArmyFarmMenu:Destroy() end
                             if pg:FindFirstChild("ArmyRouteManager") then pg.ArmyRouteManager:Destroy() end
                             if pg:FindFirstChild("ArmyRouteEditor") then pg.ArmyRouteEditor:Destroy() end
+                            if pg:FindFirstChild("ArmyWhoisDialog") then pg.ArmyWhoisDialog:Destroy() end
                             -- We explicitly DO NOT destroy ArmyPrepareFinish here so it stays visible
                         end
                     end)
@@ -4889,7 +5243,11 @@ print("[ARMY] Starting command loop...")
 while isRunning do
     -- Send periodic heartbeat
     if clientId and os.time() - lastHeartbeat >= HEARTBEAT_INTERVAL then
-        sendHeartbeat()
+        local success, response = sendHeartbeat()
+        if not success and response and response.StatusCode == 404 then
+            print("[ARMY] Heartbeat failed (404) - Client unregistered. Re-registering...")
+            task.spawn(registerClient)
+        end
         lastHeartbeat = os.time()
     end
 
@@ -4979,9 +5337,10 @@ while isRunning do
                                 elseif string.sub(action, 1, 12) == "farm_target " then
                                     local coordsStr = string.sub(action, 13)
                                     local coords = string.split(coordsStr, ",")
-                                    if #coords == 3 then
+                                    if #coords >= 3 then
                                         local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
-                                        startFarmingTarget(targetPos)
+                                        local targetId = tonumber(coords[4]) -- Optional 4th arg
+                                        startFarmingTarget(targetPos, targetId)
                                     end
                                     return true
                                 elseif string.sub(action, 1, 14) == "execute_route " then
@@ -4991,6 +5350,18 @@ while isRunning do
                                     end)
                                     if success and data and data.waypoints then
                                         startRouteExecution(data.waypoints)
+                                    end
+                                    return true
+                                elseif string.sub(action, 1, 18) == "farm_targets_list " then
+                                    local listStr = string.sub(action, 19)
+                                    local ids = {}
+                                    for idStr in string.gmatch(listStr, "([^,]+)") do
+                                        local id = tonumber(idStr)
+                                        if id then table.insert(ids, id) end
+                                    end
+                                    if #ids > 0 then
+                                        print("[FARM] Received list of " .. #ids .. " targets")
+                                        startFarmingList(ids)
                                     end
                                     return true
                                 elseif string.sub(action, 1, 15) == "target_drop_at " then
