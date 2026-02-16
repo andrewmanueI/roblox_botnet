@@ -1,4 +1,6 @@
-﻿const path = require('path');
+﻿const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const WebSocket = require('ws');
 
 const IMPULSES = new Set(["rejoin", "reset", "reload"]);
@@ -249,16 +251,6 @@ const handleAcknowledge = (clientId, commandId, success, result, error) => {
     }
 };
 
-const cleanupClients = () => {
-    const now = Date.now();
-    for (const [id, client] of clients.entries()) {
-        if (now - client.lastSeen > 10000) { // 10 seconds timeout
-            console.log(`[CLIENT] Time-out: ${id}`);
-            clients.delete(id);
-        }
-    }
-};
-setInterval(cleanupClients, 5000); // Check every 5 seconds
 
 console.log("ARMY HTTP SERVER RUNNING (POLLING MODE)");
 console.log("Listening on Port: 5555");
@@ -486,56 +478,12 @@ const server = http.createServer((req, res) => {
                         return;
                     }
 
-                    // Record command execution in client
-                    if (!client.executedCommands) {
-                        client.executedCommands = new Set();
-                    }
-
                     client.executedCommands.add(commandId);
                     client.lastCommandId = commandId;
                     client.lastSeen = Date.now();
 
                     // Refactored to shared function
                     handleAcknowledge(clientId, commandId, success, result, error);
-
-                    // Avoid "[object Object]" spam on JSON payloads.
-                    const logPayload = (typeof payloadRaw === 'string') ? payloadRaw : (payloadRaw ? '[json]' : '');
-                    console.log(`[ACK] Client ${clientId} executed command ${commandId} ${success ? 'successfully' : 'failed'}${logPayload ? ': ' + logPayload : ''}`);
-
-                    // Record in command history
-                    const command = commandHistory.get(commandId);
-                    if (command) {
-                        if (!command.executedBy) {
-                            command.executedBy = [];
-                        }
-                        
-                        // Try to parse payload as JSON (relay data)
-                        let processedPayload = payloadRaw;
-                        if (typeof payloadRaw === 'string' && (payloadRaw.startsWith('[') || payloadRaw.startsWith('{'))) {
-                            try {
-                                processedPayload = JSON.parse(payloadRaw);
-                            } catch (e) {
-                                // Not valid JSON, keep as string
-                            }
-                        }
-
-                        command.executedBy.push({
-                            clientId,
-                            executedAt: Date.now(),
-                            success,
-                            data: processedPayload, // Store as 'data' for clarity if JSON
-                            error: (success ? null : (typeof processedPayload === 'string' ? processedPayload : null)),
-                            lastSeen: client ? client.lastSeen : null
-                        });
-
-                        // Cache inventory if this was a report command
-                        if (command.action.startsWith('inventory_report_all') && processedPayload && typeof processedPayload === 'object') {
-                            clientInventories.set(clientId, {
-                                data: processedPayload,
-                                timestamp: Date.now()
-                            });
-                        }
-                    }
 
                     res.writeHead(200);
                     res.end('OK');
