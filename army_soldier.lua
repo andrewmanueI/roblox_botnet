@@ -179,6 +179,14 @@ local infJumpEnabled = true
 local infJumpConnection = nil
 local infJumpDebounce = false
 
+-- Shortcuts Configuration
+local shortcutBindings = {} -- [actionId] = { id, label, callback, bind = {key, ctrl, alt, shift} }
+local shortcutOrder = {} -- stable render + match order
+local shortcutRows = {} -- [actionId] = { bindLabel, recordBtn }
+local isRecordingShortcut = false
+local recordingActionId = nil
+local recordingConnection = nil
+
 
 -- Centralized Network Request Helper
 local networkRequest = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
@@ -366,6 +374,219 @@ local function sendNotify(title, text)
             Duration = 3
         })
     end)
+end
+
+local function isModifierKey(keyCode)
+    return keyCode == Enum.KeyCode.LeftControl
+        or keyCode == Enum.KeyCode.RightControl
+        or keyCode == Enum.KeyCode.LeftAlt
+        or keyCode == Enum.KeyCode.RightAlt
+        or keyCode == Enum.KeyCode.LeftShift
+        or keyCode == Enum.KeyCode.RightShift
+end
+
+local function getShortcutBindText(bind)
+    if not bind or not bind.key then
+        return "Unbound"
+    end
+
+    local parts = {}
+    if bind.ctrl then table.insert(parts, "Ctrl") end
+    if bind.alt then table.insert(parts, "Alt") end
+    if bind.shift then table.insert(parts, "Shift") end
+    table.insert(parts, bind.key.Name)
+    return table.concat(parts, " + ")
+end
+
+local function makeShortcutActionId(groupName, actionName)
+    local raw = string.lower(tostring(groupName or "") .. "_" .. tostring(actionName or ""))
+    raw = raw:gsub("[^%w]+", "_")
+    raw = raw:gsub("_+", "_")
+    raw = raw:gsub("^_", "")
+    raw = raw:gsub("_$", "")
+    return raw
+end
+
+local function parseShortcutLabel(label)
+    local normalized = tostring(label or "")
+    local groupName, actionName = string.match(normalized, "^(.-)%s*/%s*(.+)$")
+    if not groupName or not actionName then
+        return "Other", normalized
+    end
+    return groupName, actionName
+end
+
+local function isBindPressed(bind, inputKeyCode)
+    if not bind or not bind.key or inputKeyCode ~= bind.key then
+        return false
+    end
+
+    local ctrlDown = UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)
+    local altDown = UserInputService:IsKeyDown(Enum.KeyCode.LeftAlt) or UserInputService:IsKeyDown(Enum.KeyCode.RightAlt)
+    local shiftDown = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
+
+    if (bind.ctrl == true) ~= ctrlDown then return false end
+    if (bind.alt == true) ~= altDown then return false end
+    if (bind.shift == true) ~= shiftDown then return false end
+
+    return true
+end
+
+local function updateShortcutRow(actionId)
+    local row = shortcutRows[actionId]
+    local entry = shortcutBindings[actionId]
+    if not row or not entry then return end
+
+    if row.titleLabel then
+        row.titleLabel.Text = entry.actionName or entry.label
+    end
+
+    if row.groupLabel then
+        row.groupLabel.Text = entry.group or "Other"
+    end
+
+    if row.bindLabel then
+        row.bindLabel.Text = getShortcutBindText(entry.bind)
+    end
+
+    if row.recordBtn then
+        if isRecordingShortcut and recordingActionId == actionId then
+            row.recordBtn.Text = "Press Combo..."
+            row.recordBtn.BackgroundColor3 = Color3.fromRGB(150, 120, 255)
+        else
+            row.recordBtn.Text = "Bind"
+            row.recordBtn.BackgroundColor3 = Color3.fromRGB(60, 95, 170)
+        end
+    end
+end
+
+local function updateAllShortcutRows()
+    for actionId, _ in pairs(shortcutRows) do
+        updateShortcutRow(actionId)
+    end
+end
+
+local function applyShortcutBind(actionId, bind)
+    local entry = shortcutBindings[actionId]
+    if not entry then return end
+    entry.bind = bind
+    updateShortcutRow(actionId)
+end
+
+local function stopShortcutRecording()
+    if recordingConnection then
+        recordingConnection:Disconnect()
+        recordingConnection = nil
+    end
+    isRecordingShortcut = false
+    recordingActionId = nil
+    updateAllShortcutRows()
+end
+
+local function startShortcutRecording(actionId)
+    local entry = shortcutBindings[actionId]
+    if not entry then return end
+
+    stopShortcutRecording()
+    isRecordingShortcut = true
+    recordingActionId = actionId
+    updateAllShortcutRows()
+
+    sendNotify("Shortcuts", "Press a combo for " .. entry.label .. " (Esc cancel, Backspace clear)")
+
+    recordingConnection = UserInputService.InputBegan:Connect(function(input, processed)
+        if processed then return end
+        if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+
+        local keyCode = input.KeyCode
+        if keyCode == Enum.KeyCode.Unknown then return end
+
+        if keyCode == Enum.KeyCode.Escape then
+            stopShortcutRecording()
+            sendNotify("Shortcuts", "Bind cancelled")
+            return
+        end
+
+        if keyCode == Enum.KeyCode.Backspace then
+            applyShortcutBind(actionId, nil)
+            stopShortcutRecording()
+            sendNotify("Shortcuts", "Bind cleared for " .. entry.label)
+            return
+        end
+
+        if isModifierKey(keyCode) then
+            return
+        end
+
+        local bind = {
+            key = keyCode,
+            ctrl = UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.RightControl),
+            alt = UserInputService:IsKeyDown(Enum.KeyCode.LeftAlt) or UserInputService:IsKeyDown(Enum.KeyCode.RightAlt),
+            shift = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
+        }
+
+        applyShortcutBind(actionId, bind)
+        stopShortcutRecording()
+        sendNotify("Shortcuts", entry.label .. " -> " .. getShortcutBindText(bind))
+    end)
+end
+
+local function registerShortcutAction(actionId, label, callback)
+    local groupName, actionName = parseShortcutLabel(label)
+    local existing = shortcutBindings[actionId]
+    if existing then
+        existing.label = label
+        existing.group = groupName
+        existing.actionName = actionName
+        existing.callback = callback
+        return
+    end
+
+    shortcutBindings[actionId] = {
+        id = actionId,
+        label = label,
+        group = groupName,
+        actionName = actionName,
+        callback = callback,
+        bind = nil
+    }
+    table.insert(shortcutOrder, actionId)
+end
+
+local function setDefaultShortcutBind(actionId, bind)
+    local entry = shortcutBindings[actionId]
+    if not entry then return end
+    if entry.bind == nil then
+        entry.bind = bind
+    end
+end
+
+local function executeShortcutFromInput(input)
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then
+        return false
+    end
+
+    if isRecordingShortcut then
+        return true
+    end
+
+    if UserInputService:GetFocusedTextBox() then
+        return false
+    end
+
+    for _, actionId in ipairs(shortcutOrder) do
+        local entry = shortcutBindings[actionId]
+        if entry and entry.callback and entry.bind and isBindPressed(entry.bind, input.KeyCode) then
+            local ok, err = pcall(entry.callback)
+            if not ok then
+                warn("[SHORTCUT] Failed to run action '" .. tostring(entry.label) .. "': " .. tostring(err))
+                sendNotify("Shortcuts", "Failed: " .. tostring(entry.label))
+            end
+            return true
+        end
+    end
+
+    return false
 end
 
 local function recordObservedAction(action)
@@ -4313,6 +4534,35 @@ local function createPanel()
     panelStroke.Color = Color3.fromRGB(60, 60, 70)
     panelStroke.Thickness = 1
     panelStroke.Transparency = 0.5
+
+    local commandsGroup, settingsGroup, shortcutsGroup -- Forward declare containers
+    local headerTitle, headerSubtitle -- Forward declare UI elements
+
+    local function switchView(target)
+        if not commandsGroup or not settingsGroup or not shortcutsGroup then return end
+        
+        -- Reset all visibility
+        commandsGroup.Visible = false
+        settingsGroup.Visible = false
+        shortcutsGroup.Visible = false
+        commandsGroup.GroupTransparency = 1
+        settingsGroup.GroupTransparency = 1
+        shortcutsGroup.GroupTransparency = 1
+
+        if target == "Settings" then
+            settingsGroup.Visible = true
+            settingsGroup.GroupTransparency = 0
+            headerSubtitle.Text = "Settings"
+        elseif target == "Shortcuts" then
+            shortcutsGroup.Visible = true
+            shortcutsGroup.GroupTransparency = 0
+            headerSubtitle.Text = "Shortcut Config"
+        else
+            commandsGroup.Visible = true
+            commandsGroup.GroupTransparency = 0
+            headerSubtitle.Text = "Commander Mode"
+        end
+    end
     
     -- Header
     local header = Instance.new("Frame", panel)
@@ -4323,7 +4573,7 @@ local function createPanel()
     local headerCorner = Instance.new("UICorner", header)
     headerCorner.CornerRadius = UDim.new(0, 12)
     
-    local headerTitle = Instance.new("TextLabel", header)
+    headerTitle = Instance.new("TextLabel", header)
     headerTitle.Size = UDim2.new(1, -20, 0, 24)
     headerTitle.Position = UDim2.new(0, 20, 0, 12)
     headerTitle.BackgroundTransparency = 1
@@ -4333,7 +4583,7 @@ local function createPanel()
     headerTitle.Font = Enum.Font.GothamBold
     headerTitle.TextXAlignment = Enum.TextXAlignment.Left
     
-    local headerSubtitle = Instance.new("TextLabel", header)
+    headerSubtitle = Instance.new("TextLabel", header)
     headerSubtitle.Size = UDim2.new(1, -20, 0, 14)
     headerSubtitle.Position = UDim2.new(0, 20, 0, 38)
     headerSubtitle.BackgroundTransparency = 1
@@ -4354,7 +4604,13 @@ local function createPanel()
     gearBtn.Text = "⚙"
     gearBtn.TextColor3 = Color3.fromRGB(210, 210, 220)
     gearBtn.TextSize = 16
-    gearBtn.Font = Enum.Font.GothamBold
+    gearBtn.MouseButton1Click:Connect(function()
+        if settingsGroup.Visible then
+            switchView("Commands")
+        else
+            switchView("Settings")
+        end
+    end)
 
     local gearCorner = Instance.new("UICorner", gearBtn)
     gearCorner.CornerRadius = UDim.new(0, 8)
@@ -4363,9 +4619,38 @@ local function createPanel()
     gearStroke.Color = Color3.fromRGB(60, 60, 70)
     gearStroke.Thickness = 1
     gearStroke.Transparency = 0.6
+
+    -- Shortcuts Button
+    local shortcutsBtn = Instance.new("TextButton", header)
+    shortcutsBtn.Name = "ShortcutsBtn"
+    shortcutsBtn.Size = UDim2.new(0, 28, 0, 28)
+    shortcutsBtn.Position = UDim2.new(1, -72, 0, 16)
+    shortcutsBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
+    shortcutsBtn.BorderSizePixel = 0
+    shortcutsBtn.AutoButtonColor = false
+    shortcutsBtn.Text = "⌨"
+    shortcutsBtn.TextColor3 = Color3.fromRGB(210, 210, 220)
+    shortcutsBtn.TextSize = 16
+    shortcutsBtn.Font = Enum.Font.GothamBold
+
+    local shortcutsCorner = Instance.new("UICorner", shortcutsBtn)
+    shortcutsCorner.CornerRadius = UDim.new(0, 8)
+
+    local shortcutsStroke = Instance.new("UIStroke", shortcutsBtn)
+    shortcutsStroke.Color = Color3.fromRGB(60, 60, 70)
+    shortcutsStroke.Thickness = 1
+    shortcutsStroke.Transparency = 0.6
+    
+    shortcutsBtn.MouseButton1Click:Connect(function()
+        if shortcutsGroup.Visible then
+            switchView("Commands")
+        else
+            switchView("Shortcuts")
+        end
+    end)
     
     -- Fade transition containers (CanvasGroup fades all descendants cleanly).
-    local commandsGroup = Instance.new("CanvasGroup", panel)
+    commandsGroup = Instance.new("CanvasGroup", panel)
     commandsGroup.Name = "CommandsGroup"
     commandsGroup.Size = UDim2.new(1, -20, 1, -80)
     commandsGroup.Position = UDim2.new(0, 10, 0, 70)
@@ -4373,13 +4658,21 @@ local function createPanel()
     commandsGroup.Visible = true
     commandsGroup.GroupTransparency = 0
 
-    local settingsGroup = Instance.new("CanvasGroup", panel)
+    settingsGroup = Instance.new("CanvasGroup", panel)
     settingsGroup.Name = "SettingsGroup"
     settingsGroup.Size = UDim2.new(1, -20, 1, -80)
     settingsGroup.Position = UDim2.new(0, 10, 0, 70)
     settingsGroup.BackgroundTransparency = 1
     settingsGroup.Visible = false
     settingsGroup.GroupTransparency = 1
+
+    shortcutsGroup = Instance.new("CanvasGroup", panel)
+    shortcutsGroup.Name = "ShortcutsGroup"
+    shortcutsGroup.Size = UDim2.new(1, -20, 1, -80)
+    shortcutsGroup.Position = UDim2.new(0, 10, 0, 70)
+    shortcutsGroup.BackgroundTransparency = 1
+    shortcutsGroup.Visible = false
+    shortcutsGroup.GroupTransparency = 1
 
     -- Commands Container
     local commandsContainer = Instance.new("ScrollingFrame", commandsGroup)
@@ -4410,6 +4703,323 @@ local function createPanel()
     local settingsList = Instance.new("UIListLayout", settingsScroll)
     settingsList.SortOrder = Enum.SortOrder.LayoutOrder
     settingsList.Padding = UDim.new(0, 10)
+
+    -- Shortcuts page: compact rows + group sections + search/filter.
+    local shortcutsScroll = Instance.new("ScrollingFrame", shortcutsGroup)
+    shortcutsScroll.Size = UDim2.new(1, 0, 1, 0)
+    shortcutsScroll.Position = UDim2.new(0, 0, 0, 0)
+    shortcutsScroll.BackgroundTransparency = 1
+    shortcutsScroll.BorderSizePixel = 0
+    shortcutsScroll.ScrollBarThickness = 4
+    shortcutsScroll.ScrollBarImageColor3 = Color3.fromRGB(100, 100, 110)
+    shortcutsScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    shortcutsScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+
+    local shortcutsList = Instance.new("UIListLayout", shortcutsScroll)
+    shortcutsList.SortOrder = Enum.SortOrder.LayoutOrder
+    shortcutsList.Padding = UDim.new(0, 8)
+
+    local shortcutSearchTerm = ""
+    local shortcutActiveGroup = "All"
+    local shortcutSectionHeaders = {}
+
+    local shortcutsHint = Instance.new("TextLabel", shortcutsScroll)
+    shortcutsHint.Size = UDim2.new(1, 0, 0, 30)
+    shortcutsHint.BackgroundTransparency = 1
+    shortcutsHint.Text = "Search, filter, and bind. Esc cancels recording, Backspace clears."
+    shortcutsHint.TextWrapped = true
+    shortcutsHint.TextColor3 = Color3.fromRGB(175, 175, 190)
+    shortcutsHint.TextSize = 11
+    shortcutsHint.Font = Enum.Font.Gotham
+    shortcutsHint.TextXAlignment = Enum.TextXAlignment.Left
+    shortcutsHint.TextYAlignment = Enum.TextYAlignment.Top
+
+    local shortcutsSearch = Instance.new("TextBox", shortcutsScroll)
+    shortcutsSearch.Size = UDim2.new(1, 0, 0, 32)
+    shortcutsSearch.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
+    shortcutsSearch.BorderSizePixel = 0
+    shortcutsSearch.Text = ""
+    shortcutsSearch.PlaceholderText = "Search shortcuts..."
+    shortcutsSearch.TextColor3 = Color3.fromRGB(230, 230, 235)
+    shortcutsSearch.PlaceholderColor3 = Color3.fromRGB(135, 135, 145)
+    shortcutsSearch.TextSize = 12
+    shortcutsSearch.Font = Enum.Font.Gotham
+    shortcutsSearch.ClearTextOnFocus = false
+    Instance.new("UICorner", shortcutsSearch).CornerRadius = UDim.new(0, 6)
+
+    local filterWrap = Instance.new("Frame", shortcutsScroll)
+    filterWrap.Size = UDim2.new(1, 0, 0, 34)
+    filterWrap.BackgroundTransparency = 1
+
+    local filterScroll = Instance.new("ScrollingFrame", filterWrap)
+    filterScroll.Size = UDim2.new(1, 0, 1, 0)
+    filterScroll.BackgroundTransparency = 1
+    filterScroll.BorderSizePixel = 0
+    filterScroll.ScrollBarThickness = 2
+    filterScroll.ScrollBarImageColor3 = Color3.fromRGB(95, 95, 110)
+    filterScroll.AutomaticCanvasSize = Enum.AutomaticSize.X
+    filterScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+
+    local filterList = Instance.new("UIListLayout", filterScroll)
+    filterList.FillDirection = Enum.FillDirection.Horizontal
+    filterList.SortOrder = Enum.SortOrder.LayoutOrder
+    filterList.Padding = UDim.new(0, 6)
+
+    local emptyShortcutsLabel = Instance.new("TextLabel", shortcutsScroll)
+    emptyShortcutsLabel.Size = UDim2.new(1, 0, 0, 40)
+    emptyShortcutsLabel.BackgroundTransparency = 1
+    emptyShortcutsLabel.Text = "No shortcuts match this filter."
+    emptyShortcutsLabel.TextColor3 = Color3.fromRGB(140, 140, 150)
+    emptyShortcutsLabel.TextSize = 12
+    emptyShortcutsLabel.Font = Enum.Font.Gotham
+    emptyShortcutsLabel.TextXAlignment = Enum.TextXAlignment.Left
+    emptyShortcutsLabel.Visible = false
+
+    local function clearShortcutHeaders()
+        for _, header in ipairs(shortcutSectionHeaders) do
+            if header then header:Destroy() end
+        end
+        shortcutSectionHeaders = {}
+    end
+
+    local function createShortcutHeader(groupName, layoutOrder)
+        local header = Instance.new("TextLabel", shortcutsScroll)
+        header.Size = UDim2.new(1, 0, 0, 20)
+        header.BackgroundTransparency = 1
+        header.Text = string.upper(groupName or "OTHER")
+        header.TextColor3 = Color3.fromRGB(150, 170, 220)
+        header.TextSize = 11
+        header.Font = Enum.Font.GothamBold
+        header.TextXAlignment = Enum.TextXAlignment.Left
+        header.LayoutOrder = layoutOrder
+        table.insert(shortcutSectionHeaders, header)
+        return header
+    end
+
+    local function createShortcutRow(actionId)
+        if shortcutRows[actionId] then return end
+        local entry = shortcutBindings[actionId]
+        if not entry then return end
+
+        local row = Instance.new("Frame", shortcutsScroll)
+        row.Name = "ShortcutRow"
+        row.Size = UDim2.new(1, 0, 0, 52)
+        row.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
+        row.BorderSizePixel = 0
+        Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
+
+        local rowStroke = Instance.new("UIStroke", row)
+        rowStroke.Color = Color3.fromRGB(55, 55, 65)
+        rowStroke.Thickness = 1
+        rowStroke.Transparency = 0.7
+
+        local title = Instance.new("TextLabel", row)
+        title.Size = UDim2.new(1, -170, 0, 16)
+        title.Position = UDim2.new(0, 10, 0, 5)
+        title.BackgroundTransparency = 1
+        title.Text = entry.actionName or entry.label
+        title.TextColor3 = Color3.fromRGB(230, 230, 235)
+        title.TextSize = 11
+        title.Font = Enum.Font.GothamSemibold
+        title.TextXAlignment = Enum.TextXAlignment.Left
+
+        local groupLabel = Instance.new("TextLabel", row)
+        groupLabel.Size = UDim2.new(1, -170, 0, 12)
+        groupLabel.Position = UDim2.new(0, 10, 0, 20)
+        groupLabel.BackgroundTransparency = 1
+        groupLabel.Text = entry.group or "Other"
+        groupLabel.TextColor3 = Color3.fromRGB(130, 145, 170)
+        groupLabel.TextSize = 10
+        groupLabel.Font = Enum.Font.GothamBold
+        groupLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+        local bindLabel = Instance.new("TextLabel", row)
+        bindLabel.Size = UDim2.new(1, -170, 0, 14)
+        bindLabel.Position = UDim2.new(0, 10, 0, 35)
+        bindLabel.BackgroundTransparency = 1
+        bindLabel.Text = "Unbound"
+        bindLabel.TextColor3 = Color3.fromRGB(150, 180, 255)
+        bindLabel.TextSize = 10
+        bindLabel.Font = Enum.Font.Gotham
+        bindLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+        local clearBtn = Instance.new("TextButton", row)
+        clearBtn.Size = UDim2.new(0, 60, 0, 22)
+        clearBtn.Position = UDim2.new(1, -68, 0.5, -11)
+        clearBtn.BackgroundColor3 = Color3.fromRGB(125, 70, 70)
+        clearBtn.BorderSizePixel = 0
+        clearBtn.Text = "Clear"
+        clearBtn.TextColor3 = Color3.fromRGB(230, 230, 235)
+        clearBtn.TextSize = 11
+        clearBtn.Font = Enum.Font.GothamBold
+        Instance.new("UICorner", clearBtn).CornerRadius = UDim.new(0, 6)
+
+        local recordBtn = Instance.new("TextButton", row)
+        recordBtn.Size = UDim2.new(0, 70, 0, 22)
+        recordBtn.Position = UDim2.new(1, -144, 0.5, -11)
+        recordBtn.BackgroundColor3 = Color3.fromRGB(60, 95, 170)
+        recordBtn.BorderSizePixel = 0
+        recordBtn.Text = "Bind"
+        recordBtn.TextColor3 = Color3.fromRGB(230, 230, 235)
+        recordBtn.TextSize = 11
+        recordBtn.Font = Enum.Font.GothamBold
+        Instance.new("UICorner", recordBtn).CornerRadius = UDim.new(0, 6)
+
+        recordBtn.MouseButton1Click:Connect(function()
+            startShortcutRecording(actionId)
+        end)
+
+        clearBtn.MouseButton1Click:Connect(function()
+            applyShortcutBind(actionId, nil)
+            sendNotify("Shortcuts", "Cleared bind for " .. entry.label)
+        end)
+
+        shortcutRows[actionId] = {
+            container = row,
+            titleLabel = title,
+            groupLabel = groupLabel,
+            bindLabel = bindLabel,
+            recordBtn = recordBtn
+        }
+        updateShortcutRow(actionId)
+    end
+
+    local function shortcutPassesFilter(entry)
+        if not entry then return false end
+
+        if shortcutActiveGroup ~= "All" and (entry.group or "Other") ~= shortcutActiveGroup then
+            return false
+        end
+
+        if shortcutSearchTerm == "" then
+            return true
+        end
+
+        local haystack = string.lower((entry.label or "") .. " " .. (entry.actionName or "") .. " " .. (entry.group or ""))
+        local bindText = string.lower(getShortcutBindText(entry.bind))
+        return (string.find(haystack, shortcutSearchTerm, 1, true) ~= nil) or (string.find(bindText, shortcutSearchTerm, 1, true) ~= nil)
+    end
+
+    local function applyFilterButtonStyle(btn, isActive)
+        if isActive then
+            btn.BackgroundColor3 = Color3.fromRGB(95, 130, 220)
+            btn.TextColor3 = Color3.fromRGB(245, 245, 255)
+        else
+            btn.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+            btn.TextColor3 = Color3.fromRGB(180, 180, 195)
+        end
+    end
+
+    local function refreshShortcutRowsView()
+        clearShortcutHeaders()
+
+        local entries = {}
+        for _, actionId in ipairs(shortcutOrder) do
+            local entry = shortcutBindings[actionId]
+            local row = shortcutRows[actionId]
+            if entry and row and shortcutPassesFilter(entry) then
+                table.insert(entries, { actionId = actionId, entry = entry, row = row })
+            elseif row and row.container then
+                row.container.Visible = false
+            end
+        end
+
+        table.sort(entries, function(a, b)
+            local ga = tostring(a.entry.group or "Other")
+            local gb = tostring(b.entry.group or "Other")
+            if ga ~= gb then
+                return ga < gb
+            end
+            local na = tostring(a.entry.actionName or a.entry.label or "")
+            local nb = tostring(b.entry.actionName or b.entry.label or "")
+            return string.lower(na) < string.lower(nb)
+        end)
+
+        local nextOrder = 30
+        local lastGroup = nil
+        for _, item in ipairs(entries) do
+            local groupName = item.entry.group or "Other"
+            local showHeader = (shortcutActiveGroup == "All")
+            if showHeader and groupName ~= lastGroup then
+                createShortcutHeader(groupName, nextOrder)
+                nextOrder = nextOrder + 1
+                lastGroup = groupName
+            end
+
+            if item.row.container then
+                item.row.container.Visible = true
+                item.row.container.LayoutOrder = nextOrder
+                nextOrder = nextOrder + 1
+            end
+        end
+
+        emptyShortcutsLabel.Visible = (#entries == 0)
+        if emptyShortcutsLabel.Visible then
+            emptyShortcutsLabel.LayoutOrder = nextOrder
+        end
+    end
+
+    local function rebuildShortcutFilterButtons()
+        for _, child in ipairs(filterScroll:GetChildren()) do
+            if child:IsA("TextButton") then
+                child:Destroy()
+            end
+        end
+
+        local groups = { "All" }
+        local seen = { All = true }
+        for _, actionId in ipairs(shortcutOrder) do
+            local entry = shortcutBindings[actionId]
+            local groupName = (entry and entry.group) or "Other"
+            if not seen[groupName] then
+                seen[groupName] = true
+                table.insert(groups, groupName)
+            end
+        end
+
+        table.sort(groups, function(a, b)
+            if a == "All" then return true end
+            if b == "All" then return false end
+            return tostring(a) < tostring(b)
+        end)
+
+        for _, groupName in ipairs(groups) do
+            local btn = Instance.new("TextButton", filterScroll)
+            btn.Size = UDim2.new(0, math.max(58, #groupName * 7 + 18), 1, -4)
+            btn.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+            btn.BorderSizePixel = 0
+            btn.Text = groupName
+            btn.TextSize = 11
+            btn.Font = Enum.Font.GothamSemibold
+            btn.TextColor3 = Color3.fromRGB(180, 180, 195)
+            Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+
+            applyFilterButtonStyle(btn, shortcutActiveGroup == groupName)
+            btn.MouseButton1Click:Connect(function()
+                shortcutActiveGroup = groupName
+                for _, other in ipairs(filterScroll:GetChildren()) do
+                    if other:IsA("TextButton") then
+                        applyFilterButtonStyle(other, other.Text == shortcutActiveGroup)
+                    end
+                end
+                refreshShortcutRowsView()
+            end)
+        end
+    end
+
+    shortcutsSearch:GetPropertyChangedSignal("Text"):Connect(function()
+        shortcutSearchTerm = string.lower(shortcutsSearch.Text or "")
+        refreshShortcutRowsView()
+    end)
+
+    local function syncShortcutRows()
+        for _, actionId in ipairs(shortcutOrder) do
+            createShortcutRow(actionId)
+            updateShortcutRow(actionId)
+        end
+        rebuildShortcutFilterButtons()
+        refreshShortcutRowsView()
+    end
 
     local function createToggleCard(titleText, descText, getValue, setValue)
         local card = Instance.new("Frame", settingsScroll)
@@ -4803,8 +5413,21 @@ local function createPanel()
             if subConfig.Color then
                 actualBtn.TextColor3 = subConfig.Color
             end
+
+            local actionId = makeShortcutActionId(config.Title, subConfig.Text)
+            registerShortcutAction(actionId, config.Title .. " / " .. subConfig.Text, function()
+                subConfig.Callback(actualBtn)
+            end)
+            if subConfig.DefaultBind then
+                setDefaultShortcutBind(actionId, subConfig.DefaultBind)
+            end
+            syncShortcutRows()
             
             actualBtn.MouseButton1Click:Connect(function()
+                if isRecordingShortcut then
+                    sendNotify("Shortcuts", "Finish current bind first (Esc to cancel)")
+                    return
+                end
                 subConfig.Callback(actualBtn)
             end)
             return actualBtn
@@ -4858,6 +5481,7 @@ local function createPanel()
         Buttons = {
             {
                 Text = "Jump",
+                CommandString = "jump",
                 Color = Color3.fromRGB(100, 220, 255),
                 Callback = function()
                     sendCommand("jump")
@@ -5523,6 +6147,10 @@ local function createPanel()
     -- "System" is merged into "Accounts" now.
     systemDrawer.Container.Visible = false
 
+    -- Ensure shortcuts page contains every registered action (including drawers + core actions).
+    syncShortcutRows()
+    updateAllShortcutRows()
+
     -- Initial State: Hidden
     panel.Position = UDim2.new(1, 0, 0.5, -240)
     screenGui.Parent = LocalPlayer.PlayerGui
@@ -5530,84 +6158,97 @@ local function createPanel()
     return screenGui
 end
 
--- Panel toggle with slide animation
-table.insert(connections, UserInputService.InputBegan:Connect(function(input, processed)
-    if processed then return end
-    
-    if input.KeyCode == Enum.KeyCode.G then
-        local wasCommander = isCommander
-        isCommander = true
-        
-        if not panelGui then
-            panelGui = createPanel()
-        end
-        
-        -- Re-register if we just became commander so the server knows
-        if not wasCommander then
-            task.spawn(registerClient)
-        end
-        
-        local panel = panelGui:FindFirstChild("MainPanel")
-        if not panel then return end
+local function togglePanelShortcut()
+    local wasCommander = isCommander
+    isCommander = true
 
-        if not isPanelOpen then
-            -- Open
-            isPanelOpen = true
-            panelGui.Enabled = true
-            TweenService:Create(panel, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
-                Position = UDim2.new(1, -340, 0.5, -240)
-            }):Play()
-        else
-            -- Close
-            isPanelOpen = false
-            TweenService:Create(panel, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {
-                Position = UDim2.new(1, 0, 0.5, -240)
-            }):Play()
-            
-            task.delay(0.3, function()
-                if not isPanelOpen and panelGui then
-                    panelGui.Enabled = false
-                    -- Close any open sub-menus
-                    pcall(function()
-                        local pg = LocalPlayer:FindFirstChild("PlayerGui")
-                        if pg then
-                            if pg:FindFirstChild("ArmyInventoryManager") then pg.ArmyInventoryManager:Destroy() end
-                            if pg:FindFirstChild("ArmySearchDialog") then pg.ArmySearchDialog:Destroy() end
-                            if pg:FindFirstChild("ArmyPickupManager") then pg.ArmyPickupManager:Destroy() end
-                            if pg:FindFirstChild("ArmyToolsMenu") then pg.ArmyToolsMenu:Destroy() end
-                            if pg:FindFirstChild("ArmyFarmMenu") then pg.ArmyFarmMenu:Destroy() end
-                            if pg:FindFirstChild("ArmyRouteManager") then pg.ArmyRouteManager:Destroy() end
-                            if pg:FindFirstChild("ArmyRouteEditor") then pg.ArmyRouteEditor:Destroy() end
-                            if pg:FindFirstChild("ArmyWhoisDialog") then pg.ArmyWhoisDialog:Destroy() end
-                            -- We explicitly DO NOT destroy ArmyPrepareFinish here so it stays visible
-                        end
-                    end)
+    if not panelGui then
+        panelGui = createPanel()
+    end
+
+    -- Re-register if we just became commander so the server knows
+    if not wasCommander then
+        task.spawn(registerClient)
+    end
+
+    local panel = panelGui:FindFirstChild("MainPanel")
+    if not panel then return end
+
+    if not isPanelOpen then
+        -- Open
+        isPanelOpen = true
+        panelGui.Enabled = true
+        TweenService:Create(panel, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+            Position = UDim2.new(1, -340, 0.5, -240)
+        }):Play()
+        return
+    end
+
+    -- Close
+    isPanelOpen = false
+    TweenService:Create(panel, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {
+        Position = UDim2.new(1, 0, 0.5, -240)
+    }):Play()
+
+    task.delay(0.3, function()
+        if not isPanelOpen and panelGui then
+            panelGui.Enabled = false
+            -- Close any open sub-menus
+            pcall(function()
+                local pg = LocalPlayer:FindFirstChild("PlayerGui")
+                if pg then
+                    if pg:FindFirstChild("ArmyInventoryManager") then pg.ArmyInventoryManager:Destroy() end
+                    if pg:FindFirstChild("ArmySearchDialog") then pg.ArmySearchDialog:Destroy() end
+                    if pg:FindFirstChild("ArmyPickupManager") then pg.ArmyPickupManager:Destroy() end
+                    if pg:FindFirstChild("ArmyToolsMenu") then pg.ArmyToolsMenu:Destroy() end
+                    if pg:FindFirstChild("ArmyFarmMenu") then pg.ArmyFarmMenu:Destroy() end
+                    if pg:FindFirstChild("ArmyRouteManager") then pg.ArmyRouteManager:Destroy() end
+                    if pg:FindFirstChild("ArmyRouteEditor") then pg.ArmyRouteEditor:Destroy() end
+                    if pg:FindFirstChild("ArmyWhoisDialog") then pg.ArmyWhoisDialog:Destroy() end
+                    -- We explicitly DO NOT destroy ArmyPrepareFinish here so it stays visible
                 end
             end)
+        end
+    end)
+end
+
+local function cancelOrderShortcut()
+    local now = os.clock()
+    if now - lastCancelTime < CANCEL_COOLDOWN then
+        return
     end
-    elseif input.KeyCode == Enum.KeyCode.C then
-        local now = os.clock()
-        if now - lastCancelTime < CANCEL_COOLDOWN then
-            return
-        end
 
-        -- Don't let C be used to spam notifications when nothing is happening.
-        if not hasActiveOrder() then
-            return
-        end
-
-        lastCancelTime = now
-
-        if cancelPendingClick() then
-            sendNotify("Command", "Cancelled pending target selection")
-        else
-            Movement.cancelAll(isCommander)
-            sendNotify("Command", "Cancelled current order")
-        end
-    elseif input.KeyCode == Enum.KeyCode.F3 then
-        -- Terminate everything.
-        terminateScript()
+    -- Don't let cancel be used to spam notifications when nothing is happening.
+    if not hasActiveOrder() then
+        return
     end
+
+    lastCancelTime = now
+
+    if cancelPendingClick() then
+        sendNotify("Command", "Cancelled pending target selection")
+    else
+        Movement.cancelAll(isCommander)
+        sendNotify("Command", "Cancelled current order")
+    end
+end
+
+local function terminateShortcut()
+    terminateScript()
+end
+
+registerShortcutAction("core_toggle_panel", "Core / Toggle Panel", togglePanelShortcut)
+setDefaultShortcutBind("core_toggle_panel", { key = Enum.KeyCode.G, ctrl = false, alt = false, shift = false })
+
+registerShortcutAction("core_cancel", "Core / Cancel Current Order", cancelOrderShortcut)
+setDefaultShortcutBind("core_cancel", { key = Enum.KeyCode.C, ctrl = false, alt = false, shift = false })
+
+registerShortcutAction("core_terminate", "Core / Terminate Script", terminateShortcut)
+setDefaultShortcutBind("core_terminate", { key = Enum.KeyCode.F3, ctrl = false, alt = false, shift = false })
+
+table.insert(connections, UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    executeShortcutFromInput(input)
 end))
 
 
