@@ -9,7 +9,7 @@ local function sendNotify(title, text)
 end
 
 print("[TEST CLIENT] Connecting to WebSocket...")
-local ws = WebSocket.connect("ws://localhost:5555")
+local ws = WebSocket.connect("ws://157.15.40.37:5555")
 
 ws.OnMessage:Connect(function(message)
     print("[TEST CLIENT] Received:", message)

@@ -2,7 +2,7 @@ const WebSocket = require('ws');
 
 const wss = new WebSocket.Server({ port: 5555 });
 
-console.log('[TEST SERVER] WebSocket server started on ws://localhost:5555');
+console.log('[TEST SERVER] WebSocket server started on ws://157.15.40.37:5555');
 
 wss.on('connection', (ws) => {
     console.log('[TEST SERVER] Client connected');
