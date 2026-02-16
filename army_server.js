@@ -1,6 +1,5 @@
-﻿const http = require('http');
-const fs = require('fs');
-const path = require('path');
+﻿const path = require('path');
+const WebSocket = require('ws');
 
 const IMPULSES = new Set(["rejoin", "reset", "reload"]);
 const BODY_LIMIT_BYTES = 8 * 1024;
@@ -18,6 +17,7 @@ const commandHistory = new Map(); // commandId -> { id, action, time, type, exec
 const MAX_HISTORY = 100;
 let impulseTimer = null;
 const clientInventories = new Map(); // clientId -> { data, timestamp }
+const clientSockets = new Map(); // clientId -> WebSocket
 
 // Storage path
 const STORAGE_DIR = path.join(__dirname, 'storage');
@@ -149,6 +149,14 @@ const updateCommand = (action, source) => {
     latestCommand = command;
     commandHistory.set(commandSeq, command);
 
+    // Broadcast to all connected WebSocket clients
+    const payload = JSON.stringify(command);
+    for (const [id, socket] of clientSockets.entries()) {
+        if (socket.readyState === WebSocket.OPEN) {
+            socket.send(payload);
+        }
+    }
+
     // Prune old commands
     if (commandHistory.size > MAX_HISTORY) {
         const oldestId = Math.min(...commandHistory.keys());
@@ -186,6 +194,59 @@ const updateCommand = (action, source) => {
     }
 
     return true;
+};
+
+/**
+ * Handle a command acknowledgment from a client
+ */
+const handleAcknowledge = (clientId, commandId, success, result, error) => {
+    const payloadRaw = (result !== null && result !== undefined) ? result : error;
+    const client = clients.get(clientId);
+
+    if (!client) return;
+
+    if (!client.executedCommands) {
+        client.executedCommands = new Set();
+    }
+
+    client.executedCommands.add(commandId);
+    client.lastCommandId = commandId;
+    client.lastSeen = Date.now();
+
+    const logPayload = (typeof payloadRaw === 'string') ? payloadRaw : (payloadRaw ? '[json]' : '');
+    console.log(`[ACK] Client ${clientId} executed command ${commandId} ${success ? 'successfully' : 'failed'}${logPayload ? ': ' + logPayload : ''}`);
+
+    const command = commandHistory.get(commandId);
+    if (command) {
+        if (!command.executedBy) {
+            command.executedBy = [];
+        }
+        
+        let processedPayload = payloadRaw;
+        if (typeof payloadRaw === 'string' && (payloadRaw.startsWith('[') || payloadRaw.startsWith('{'))) {
+            try {
+                processedPayload = JSON.parse(payloadRaw);
+            } catch (e) {
+                // Not valid JSON
+            }
+        }
+
+        command.executedBy.push({
+            clientId,
+            executedAt: Date.now(),
+            success,
+            data: processedPayload,
+            error: (success ? null : (typeof processedPayload === 'string' ? processedPayload : null)),
+            lastSeen: client ? client.lastSeen : null
+        });
+
+        if (command.action.startsWith('inventory_report_all') && processedPayload && typeof processedPayload === 'object') {
+            clientInventories.set(clientId, {
+                data: processedPayload,
+                timestamp: Date.now()
+            });
+        }
+    }
 };
 
 const cleanupClients = () => {
@@ -433,6 +494,9 @@ const server = http.createServer((req, res) => {
                     client.executedCommands.add(commandId);
                     client.lastCommandId = commandId;
                     client.lastSeen = Date.now();
+
+                    // Refactored to shared function
+                    handleAcknowledge(clientId, commandId, success, result, error);
 
                     // Avoid "[object Object]" spam on JSON payloads.
                     const logPayload = (typeof payloadRaw === 'string') ? payloadRaw : (payloadRaw ? '[json]' : '');
@@ -687,6 +751,92 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(5555, '0.0.0.0');
+
+// WebSocket Server Integration
+const wss = new WebSocket.Server({ server });
+
+wss.on('connection', (ws) => {
+    let clientId = null;
+
+    console.log(`[WS] New connection established (pending registration)`);
+
+    ws.on('message', (message) => {
+        try {
+            const data = JSON.parse(message.toString());
+            
+            // Handle registration
+            if (data.type === 'register') {
+                clientId = data.clientId || data.name || generateClientId();
+                const isCommander = !!data.isCommander;
+
+                clients.set(clientId, {
+                    id: clientId,
+                    registeredAt: Date.now(),
+                    lastSeen: Date.now(),
+                    lastCommandId: 0,
+                    executedCommands: new Set(),
+                    isCommander: isCommander
+                });
+
+                clientSockets.set(clientId, ws);
+                
+                console.log(`[WS:REGISTER] Client ${clientId} (Commander: ${isCommander})`);
+                ws.send(JSON.stringify({ type: 'registered', clientId: clientId }));
+                
+                // Immediately send the latest persistent command if it's not "wait"
+                if (latestCommand.type === 'persistent' && latestCommand.action !== 'wait') {
+                    ws.send(JSON.stringify(latestCommand));
+                }
+            } 
+            
+            // Handle acknowledgment
+            else if (data.type === 'acknowledge') {
+                if (!clientId) return;
+                handleAcknowledge(
+                    clientId, 
+                    data.commandId, 
+                    data.success, 
+                    data.result || data.report || data.data, 
+                    data.error
+                );
+            }
+            
+            // Handle ping/heartbeat
+            else if (data.type === 'heartbeat') {
+                if (!clientId) return;
+                const client = clients.get(clientId);
+                if (client) {
+                    client.lastSeen = Date.now();
+                    // Feedback loop: respond to heartbeat
+                    ws.send(JSON.stringify({ 
+                        type: 'heartbeat_ack', 
+                        clientId: clientId, 
+                        latestCommandId: latestCommand.id 
+                    }));
+                } else {
+                    // Client lost from server state, force re-registration
+                    ws.send(JSON.stringify({ type: 'error', code: 'not_registered' }));
+                }
+            }
+        } catch (e) {
+            console.error(`[WS:ERROR] Failed to parse message: ${e.message}`);
+        }
+    });
+
+    ws.on('close', () => {
+        if (clientId) {
+            console.log(`[WS:CLOSE] Client ${clientId} disconnected`);
+            clientSockets.delete(clientId);
+            // Optionally don't delete from `clients` immediately so it shows as "timed out" in 10s
+        } else {
+            console.log(`[WS:CLOSE] Unregistered connection closed`);
+        }
+    });
+
+    ws.on('error', (err) => {
+        console.error(`[WS:ERROR] Socket error for ${clientId || 'unknown'}: ${err.message}`);
+    });
+});
 
 // Client cleanup routine - remove inactive clients
 setInterval(() => {

@@ -17,21 +17,16 @@ local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
 
 local SERVER_URL = "http://157.15.40.37:5555"
+local WS_URL = "ws://157.15.40.37:5555"
 local RELOAD_URL = "https://raw.githubusercontent.com/andrewmanueI/roblox_botnet/master/army_soldier.lua"
-local POLL_RATE = 0.3
 local lastCommandId = 0
 local isRunning = true
 local isCommander = false
 local connections = {}
 local clientId = nil
 local executedCommands = {} -- Map of commandId -> executed (boolean)
-local lastHeartbeat = 0
-local HEARTBEAT_INTERVAL = 5 -- seconds
-local lastETag = nil
-local MIN_POLL_RATE = 0.2
-local MAX_POLL_RATE = 2.0
-local currentPollRate = POLL_RATE
-local consecutiveNoChange = 0
+local activeWS = nil
+local isConnecting = false
 
 local panelGui = nil
 local isPanelOpen = false
@@ -589,18 +584,33 @@ end
 local function acknowledgeCommand(commandId, success, errorMsg)
     if not clientId then return false end
 
-    -- Normalize success: allow explicit false (the previous `success or true` would force it to true).
+    -- Normalize success
     local normalizedSuccess = (success == nil) and true or success
 
+    local data = {
+        type = "acknowledge",
+        clientId = clientId,
+        commandId = commandId,
+        success = normalizedSuccess,
+        error = (normalizedSuccess == false) and (errorMsg or nil) or nil,
+        result = (normalizedSuccess ~= false) and (errorMsg or nil) or nil
+    }
+
+    if activeWS then
+        pcall(function()
+            activeWS:Send(HttpService:JSONEncode(data))
+        end)
+        executedCommands[commandId] = true
+        return true
+    end
+
+    -- Fallback to HTTP if WS is down
     local payload = HttpService:JSONEncode({
         clientId = clientId,
         commandId = commandId,
         success = normalizedSuccess,
-        -- Some server implementations use "error" only on failure, and a separate "result"/"report" on success.
-        -- Send the response in multiple fields for compatibility; the server can ignore what it doesn't need.
-        error = (normalizedSuccess == false) and (errorMsg or nil) or nil,
-        result = (normalizedSuccess ~= false) and (errorMsg or nil) or nil,
-        report = (normalizedSuccess ~= false) and (errorMsg or nil) or nil
+        error = data.error,
+        result = data.result
     })
 
     local ackSuccess = robustRequest({
@@ -615,6 +625,353 @@ local function acknowledgeCommand(commandId, success, errorMsg)
     end
 
     return ackSuccess
+end
+
+local function handleActionData(data)
+    if not isRunning or not data or not data.id then return end
+    
+    local commandId = data.id
+    if executedCommands[commandId] then return end
+    
+    lastCommandId = commandId
+    local action = data.action
+    recordObservedAction(action)
+    
+    -- By default, the commander does NOT obey server-issued commands.
+    local shouldExecute = (action ~= "wait") and (not isCommander or debugFollowCommands)
+
+    if shouldExecute then
+        if not isCommander then sendNotify("New Order", action) end
+
+        local execResult, execError = pcall(function()
+            -- If a tp-walk goto loop is running, it will continuously TranslateBy and can
+            -- effectively "override" other movement commands. Cancel it for non-goto actions.
+            if string.sub(action, 1, 4) ~= "goto" then
+                stopGotoWalk()
+            end
+            
+            -- BOOGA BOOGA ACTIONS --
+            if string.sub(action, 1, 21) == "inventory_report_all " then
+                local query = string.sub(action, 22)
+                local reportJson = getInventoryReport(query)
+                local reportPayload = reportJson
+
+                pcall(function()
+                    reportPayload = HttpService:JSONDecode(reportJson)
+                end)
+
+                acknowledgeCommand(commandId, true, reportPayload)
+                return true
+            elseif string.sub(action, 1, 12) == "farm_target " then
+                local coordsStr = string.sub(action, 13)
+                local coords = string.split(coordsStr, ",")
+                if #coords >= 3 then
+                    local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
+                    local targetId = tonumber(coords[4]) -- Optional 4th arg
+                    startFarmingTarget(targetPos, targetId)
+                end
+                return true
+            elseif string.sub(action, 1, 14) == "execute_route " then
+                local json = string.sub(action, 15)
+                local success, data = pcall(function()
+                    return HttpService:JSONDecode(json)
+                end)
+                if success and data and data.waypoints then
+                    startRouteExecution(data.waypoints)
+                end
+                return true
+            elseif string.sub(action, 1, 18) == "farm_targets_list " then
+                local listStr = string.sub(action, 19)
+                local ids = {}
+                for idStr in string.gmatch(listStr, "([^,]+)") do
+                    local id = tonumber(idStr)
+                    if id then table.insert(ids, id) end
+                end
+                if #ids > 0 then
+                    print("[FARM] Received list of " .. #ids .. " targets")
+                    startFarmingList(ids)
+                end
+                return true
+            elseif string.sub(action, 1, 15) == "target_drop_at " then
+                local parts = string.split(action, " ")
+                local targetId = parts[2]
+                if targetId == clientId or targetId == "all" then
+                    local coordsStr = parts[3]
+                    local qty = parts[#parts]
+                    local name = table.concat(parts, " ", 4, math.max(4, #parts - 1))
+
+                    local coords = string.split(coordsStr or "", ",")
+                    if #coords == 3 then
+                        local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
+                        sendNotify("Inventory", "Moving to remote drop point...")
+                        local reached = walkToUntilWithin(targetPos, 6)
+                        if reached then
+                            dropItemByName(name, qty)
+                        else
+                            sendNotify("Error", "Drop cancelled (obstructed/timed out)")
+                            warn("[DROP] Cancelled/aborted before reaching drop point; not dropping.")
+                        end
+                    end
+                end
+                return true
+            elseif string.sub(action, 1, 13) == "prepare_tool " then
+                local params = string.sub(action, 14)
+                local parts = string.split(params, " ")
+                if #parts >= 3 then
+                    local itemName = table.concat(parts, " ", 1, #parts - 2)
+                    local pos1Str = parts[#parts - 1]
+                    local pos2Str = parts[#parts]
+                    
+                    local p1Parts = string.split(pos1Str, ",")
+                    local p2Parts = string.split(pos2Str, ",")
+                    
+                    if #p1Parts == 3 and #p2Parts == 3 then
+                        local p1 = Vector3.new(tonumber(p1Parts[1]), tonumber(p1Parts[2]), tonumber(p1Parts[3]))
+                        local p2 = Vector3.new(tonumber(p2Parts[1]), tonumber(p2Parts[2]), tonumber(p2Parts[3]))
+                        startPrepareTool(itemName, p1, p2)
+                    end
+                end
+                return true
+            elseif string.sub(action, 1, 12) == "target_drop " then
+                local parts = string.split(action, " ")
+                if parts[2] == clientId then
+                    local qty = parts[#parts]
+                    local name = table.concat(parts, " ", 3, math.max(3, #parts - 1))
+                    dropItemByName(name, qty)
+                end
+                return true
+            end
+            
+            if string.sub(action, 1, 5) == "bring" then
+                stopFollowing()
+                local coords = string.split(string.sub(action, 7), ",")
+                if #coords == 3 then
+                    local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
+                    Movement.tweenTo(targetPos, { speedDiv = 50, minTime = 1, randomRadius = 3, yOffset = 1 })
+                end
+            elseif string.sub(action, 1, 4) == "goto" then
+                stopFollowing()
+                local coords = string.split(string.sub(action, 6), ",")
+                if #coords == 3 then
+                    local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
+                    Movement.slideTo(targetPos)
+                end
+            elseif string.sub(action, 1, 6) == "walkto" then
+                stopFollowing()
+                local coords = string.split(string.sub(action, 8), ",")
+                if #coords == 3 then
+                    local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
+                    Movement.walkTo(targetPos)
+                end
+            elseif string.sub(action, 1, 8) == "pathfind" then
+                stopFollowing()
+                local coords = string.split(string.sub(action, 10), ",")
+                if #coords == 3 then
+                    local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
+                    Movement.pathfindTo(targetPos)
+                end
+            elseif action == "cancel" then
+                stopPrepare()
+                Movement.cancelAll(false)
+            elseif action == "jump" then
+                if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+                    LocalPlayer.Character.Humanoid.Jump = true
+                end
+            elseif string.sub(action, 1, 11) == "join_server" then
+                local args = string.split(string.sub(action, 13), " ")
+                if #args == 2 then
+                    TeleportService:TeleportToPlaceInstance(tonumber(args[1]), args[2], LocalPlayer)
+                end
+            elseif action == "reset" then
+                if LocalPlayer.Character then LocalPlayer.Character:BreakJoints() end
+            elseif string.sub(action, 1, 6) == "follow" then
+                local args = string.split(string.sub(action, 8), " ")
+                local userId = tonumber(args[1])
+                if userId then startFollowing(userId, args[2]) end
+            elseif action == "stop_follow" then
+                stopFollowing()
+            elseif string.sub(action, 1, 15) == "set_autojump " then
+                local enabledStr = string.sub(action, 16)
+                autoJumpEnabled = (enabledStr == "true")
+            elseif action == "refresh_configs" then
+                fetchServerConfigs()
+            elseif action == "reload" then
+                terminateScript()
+                loadstring(game:HttpGet(RELOAD_URL .. "?t=" .. os.time()))()
+                return
+            elseif string.sub(action, 1, 17) == "formation_follow " then
+                local payload = string.sub(action, 18)
+                local userIdStr, shapeStr, offsetsJson = string.match(payload, "^(%S+)%s+(%S+)%s+(.+)$")
+                if userIdStr and shapeStr and offsetsJson then
+                    formationLeaderId = tonumber(userIdStr)
+                    formationShape = shapeStr
+                    formationMode = "Follow"
+                    formationActive = true
+                    local success, offsetsData = pcall(function()
+                        return HttpService:JSONDecode(offsetsJson)
+                    end)
+                    if success and offsetsData then
+                        formationOffsets = offsetsData
+                    else
+                        formationOffsets = nil
+                    end
+                    if formationLeaderId then
+                        startFollowing(formationLeaderId, formationShape)
+                    end
+                    sendNotify("Formation", "Following " .. (userIdStr or "leader") .. " in " .. formationShape)
+                end
+            elseif string.sub(action, 1, 7) == "voodoo " then
+                local payload = string.sub(action, 8)
+                local mode, coordsStr = string.match(payload, "^(%S+)%s+(.+)$")
+                if mode and coordsStr then
+                    local coords = string.split(coordsStr, ",")
+                    if #coords == 3 then
+                        local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
+                        local count = (mode == "burst") and 3 or 1
+                        fireVoodoo(targetPos, count)
+                    end
+                end
+            elseif string.sub(action, 1, 6) == "equip " then
+                local slot = tonumber(string.sub(action, 7))
+                if slot then fireEquip(slot) end
+            elseif action == "unequip_all" then
+                for slot = 1, 6 do
+                    fireInventoryStore(slot)
+                    task.wait(0.05)
+                end
+            elseif string.sub(action, 1, 11) == "sync_equip " then
+                local toolName = string.sub(action, 12)
+                if toolName then task.spawn(scanAndEquip, toolName) end
+            elseif string.sub(action, 1, 15) == "formation_goto " then
+                local payload = string.sub(action, 16)
+                local coordsStr, shapeStr, positionsJson = string.match(payload, "^(%S+)%s+(%S+)%s+(.+)$")
+                if coordsStr and shapeStr and positionsJson then
+                    local coords = string.split(coordsStr, ",")
+                    formationShape = shapeStr
+                    formationMode = "Goto"
+                    formationActive = true
+                    if #coords == 3 then
+                        formationCenter = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
+                        if positionsJson then
+                            local success, positionsData = pcall(function()
+                                return HttpService:JSONDecode(positionsJson)
+                            end)
+                            if success and positionsData and positionsData[clientId] then
+                                local myPos = positionsData[clientId]
+                                local targetPos = Vector3.new(myPos.x, myPos.y, myPos.z)
+                                stopFollowing()
+                                Movement.walkTo(targetPos)
+                                sendNotify("Formation", "Walking to assigned " .. formationShape .. " position")
+                            else
+                                sendNotify("Formation", "No position assigned by commander")
+                            end
+                        end
+                    end
+                end
+            elseif action == "formation_clear" then
+                formationActive = false
+                formationMode = "Follow"
+                formationShape = "Line"
+                formationLeaderId = nil
+                formationCenter = nil
+                stopFollowing()
+                stopGotoWalk()
+                stopMoveTween()
+                clearHolographicCubes()
+                sendNotify("Formation", "Formation cleared")
+            elseif action == "rejoin" then
+                TeleportService:Teleport(game.PlaceId, LocalPlayer)
+            elseif action == "spawn" then
+                task.spawn(function()
+                    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+                    local playButton = playerGui and playerGui:FindFirstChild("SpawnGui", true) 
+                        and playerGui.SpawnGui:FindFirstChild("Customization", true)
+                        and playerGui.SpawnGui.Customization:FindFirstChild("PlayButton", true)
+                    
+                    if playButton and playButton:IsA("TextButton") then
+                        if firesignal then
+                            firesignal(playButton.MouseButton1Click)
+                            firesignal(playButton.Activated)
+                        end
+                        pcall(function() playButton:Activate() end)
+                        sendNotify("Army", "Spawn button clicked")
+                    else
+                        sendNotify("Army", "Spawn button not found")
+                    end
+                end)
+            end
+        end)
+        
+        if not execResult then
+            warn("[ARMY] Command failed:", action, execError)
+        end
+        acknowledgeCommand(commandId, execResult, execError)
+    else
+        -- Commander is ignoring server orders (or it's a wait/no-op).
+        acknowledgeCommand(commandId, true, nil)
+    end
+end
+
+local function connectWebSocket()
+    if not isRunning or isConnecting then return end
+    isConnecting = true
+    
+    print("[ARMY] Connecting to WebSocket: " .. WS_URL)
+    local success, ws = pcall(function()
+        return WebSocket.connect(WS_URL)
+    end)
+    
+    if not success or not ws then
+        warn("[ARMY] WebSocket connection failed. Retrying in 5s...")
+        isConnecting = false
+        task.delay(5, connectWebSocket)
+        return
+    end
+    
+    activeWS = ws
+    isConnecting = false
+    
+    ws.OnMessage:Connect(function(message)
+        local success, data = pcall(function()
+            return HttpService:JSONDecode(message)
+        end)
+        
+        if success and data then
+            if data.type == "registered" then
+                clientId = data.clientId
+                sendNotify("System", "Registered via WS: " .. clientId)
+                print("[ARMY] Registered via WS as " .. clientId)
+            elseif data.type == "heartbeat_ack" then
+                -- Registration confirmed by server
+                -- print("[ARMY] Heartbeat ACK")
+            elseif data.type == "error" and data.code == "not_registered" then
+                warn("[ARMY] Server says not registered. Re-registering...")
+                activeWS:Send(HttpService:JSONEncode({
+                    type = "register",
+                    name = LocalPlayer.Name,
+                    isCommander = isCommander,
+                    clientId = clientId
+                }))
+            elseif data.id then
+                handleActionData(data)
+            end
+        end
+    end)
+    
+    ws.OnClose:Connect(function()
+        print("[ARMY] WebSocket disconnected. Reconnecting in 5s...")
+        activeWS = nil
+        task.delay(5, connectWebSocket)
+    end)
+    
+    -- Register
+    local regData = {
+        type = "register",
+        name = LocalPlayer.Name,
+        isCommander = isCommander,
+        clientId = clientId -- Reuse if we have one
+    }
+    ws:Send(HttpService:JSONEncode(regData))
 end
 
 highlightPlayers = function()
@@ -5205,17 +5562,12 @@ table.insert(connections, UserInputService.InputBegan:Connect(function(input, pr
 end))
 
 
--- Register client before polling starts
+-- Initial registration and WebSocket connection
 task.wait(1)
--- One registration attempt. No retries.
-local registered = registerClient()
-
-if not registered then
-    sendNotify("Warning", "Failed to register - running without ID")
-end
+connectWebSocket()
 
 sendNotify("Army Script", "Press G to toggle Panel | F3 to Terminate")
-print("Army Soldier loaded - Press G for panel")
+print("Army Soldier loaded - WebSocket Mode")
 
 local function setupInfiniteJump()
     if infJumpConnection then infJumpConnection:Disconnect() end
@@ -5238,407 +5590,18 @@ LocalPlayer.CharacterAdded:Connect(function()
     setupInfiniteJump()
 end)
 
--- Polling loop (Main Thread)
-print("[ARMY] Starting command loop...")
+-- Polling loop removed. WebSocket handling is async via OnMessage.
 while isRunning do
-    -- Send periodic heartbeat
-    if clientId and os.time() - lastHeartbeat >= HEARTBEAT_INTERVAL then
-        local success, response = sendHeartbeat()
-        if not success and response and response.StatusCode == 404 then
-            print("[ARMY] Heartbeat failed (404) - Client unregistered. Re-registering...")
-            task.spawn(registerClient)
-        end
-        lastHeartbeat = os.time()
-    end
-
-    -- Enhanced polling with ETag support
-    local success, response
-
-    if networkRequest then
-        local headers = {}
-        if lastETag then
-            headers["If-None-Match"] = lastETag
-        end
-        success, response = robustRequest({
-            Url = SERVER_URL .. "/",
-            Method = "GET",
-            Headers = headers
-        }) -- Retries disabled
-    else
-        -- Fallback to game:HttpGet
-        success, response = pcall(function()
-            return { StatusCode = 200, Body = game:HttpGet(SERVER_URL, true) }
+    -- Polling thru websockets: send heartbeat every 5s to verify registration
+    task.wait(5)
+    
+    if activeWS and clientId then
+        pcall(function()
+            activeWS:Send(HttpService:JSONEncode({ type = "heartbeat", clientId = clientId }))
         end)
+    elseif not activeWS and not isConnecting then
+        connectWebSocket()
     end
-
-    if success and isRunning and response then
-        -- Handle 304 Not Modified
-        if response.StatusCode == 304 then
-            consecutiveNoChange = consecutiveNoChange + 1
-            if consecutiveNoChange > 10 then
-                currentPollRate = math.min(MAX_POLL_RATE, currentPollRate + 0.1)
-            end
-        elseif response.StatusCode == 200 then
-            if response.Headers and response.Headers["ETag"] then
-                lastETag = response.Headers["ETag"]
-            end
-
-            local jsonSuccess, data = pcall(function()
-                return HttpService:JSONDecode(response.Body)
-            end)
-
-            if jsonSuccess and data and data.id and data.id ~= lastCommandId then
-                local commandId = data.id
-
-                if not executedCommands[commandId] then
-                    lastCommandId = commandId
-                    local action = data.action
-                    recordObservedAction(action)
-                    
-                    consecutiveNoChange = 0
-                    currentPollRate = MIN_POLL_RATE
-
-                    task.spawn(function()
-                        -- By default, the commander does NOT obey server-issued commands.
-                        -- Enable `debugFollowCommands` if you want the commander to follow commands too.
-                        local shouldExecute = (action ~= "wait") and (not isCommander or debugFollowCommands)
-
-                        -- Even if we don't execute on commander, still show what came back from the server
-                        -- so you can verify the command actually made it through.
-                        -- Silence automated order notifications on commander per request
-                        -- if isCommander and observeServerCommands and (action ~= "wait") then
-                        --     sendNotify("Order Received", action)
-                        -- end
-
-                        if shouldExecute then
-                            if not isCommander then sendNotify("New Order", action) end
-
-                            local execResult, execError = pcall(function()
-                                -- If a tp-walk goto loop is running, it will continuously TranslateBy and can
-                                -- effectively "override" other movement commands. Cancel it for non-goto actions.
-                                if string.sub(action, 1, 4) ~= "goto" then
-                                    stopGotoWalk()
-                                end
-                                
-                                -- BOOGA BOOGA ACTIONS --
-                                if string.sub(action, 1, 21) == "inventory_report_all " then
-                                    local query = string.sub(action, 22)
-                                    local reportJson = getInventoryReport(query)
-                                    local reportPayload = reportJson
-
-                                    -- Prefer sending a decoded table (real JSON) if possible, so the server
-                                    -- doesn't have to JSON-decode a string inside JSON.
-                                    pcall(function()
-                                        reportPayload = HttpService:JSONDecode(reportJson)
-                                    end)
-
-                                    acknowledgeCommand(commandId, true, reportPayload)
-                                    return true
-                                elseif string.sub(action, 1, 12) == "farm_target " then
-                                    local coordsStr = string.sub(action, 13)
-                                    local coords = string.split(coordsStr, ",")
-                                    if #coords >= 3 then
-                                        local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
-                                        local targetId = tonumber(coords[4]) -- Optional 4th arg
-                                        startFarmingTarget(targetPos, targetId)
-                                    end
-                                    return true
-                                elseif string.sub(action, 1, 14) == "execute_route " then
-                                    local json = string.sub(action, 15)
-                                    local success, data = pcall(function()
-                                        return HttpService:JSONDecode(json)
-                                    end)
-                                    if success and data and data.waypoints then
-                                        startRouteExecution(data.waypoints)
-                                    end
-                                    return true
-                                elseif string.sub(action, 1, 18) == "farm_targets_list " then
-                                    local listStr = string.sub(action, 19)
-                                    local ids = {}
-                                    for idStr in string.gmatch(listStr, "([^,]+)") do
-                                        local id = tonumber(idStr)
-                                        if id then table.insert(ids, id) end
-                                    end
-                                    if #ids > 0 then
-                                        print("[FARM] Received list of " .. #ids .. " targets")
-                                        startFarmingList(ids)
-                                    end
-                                    return true
-                                elseif string.sub(action, 1, 15) == "target_drop_at " then
-                                    -- Format: target_drop_at <clientId> <x,y,z> <name...> <qty>
-                                    local parts = string.split(action, " ")
-                                    local targetId = parts[2]
-                                    if targetId == clientId or targetId == "all" then
-                                        local coordsStr = parts[3]
-                                        local qty = parts[#parts]
-                                        local name = table.concat(parts, " ", 4, math.max(4, #parts - 1))
-
-                                        local coords = string.split(coordsStr or "", ",")
-                                        if #coords == 3 then
-                                            local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
-                                            -- Walk until we're close, then start dropping.
-                                            sendNotify("Inventory", "Moving to remote drop point...")
-                                            local reached = walkToUntilWithin(targetPos, 6)
-                                            if reached then
-                                                dropItemByName(name, qty)
-                                            else
-                                                sendNotify("Error", "Drop cancelled (obstructed/timed out)")
-                                                warn("[DROP] Cancelled/aborted before reaching drop point; not dropping.")
-                                            end
-                                        end
-                                    end
-                                    return true
-                                elseif string.sub(action, 1, 13) == "prepare_tool " then
-                                    local params = string.sub(action, 14)
-                                    local parts = string.split(params, " ")
-                                    if #parts >= 3 then
-                                        local itemName = table.concat(parts, " ", 1, #parts - 2)
-                                        local pos1Str = parts[#parts - 1]
-                                        local pos2Str = parts[#parts]
-                                        
-                                        local p1Parts = string.split(pos1Str, ",")
-                                        local p2Parts = string.split(pos2Str, ",")
-                                        
-                                        if #p1Parts == 3 and #p2Parts == 3 then
-                                            local p1 = Vector3.new(tonumber(p1Parts[1]), tonumber(p1Parts[2]), tonumber(p1Parts[3]))
-                                            local p2 = Vector3.new(tonumber(p2Parts[1]), tonumber(p2Parts[2]), tonumber(p2Parts[3]))
-                                            startPrepareTool(itemName, p1, p2)
-                                        end
-                                    end
-                                    return true
-                                elseif string.sub(action, 1, 12) == "target_drop " then
-                                    -- Format: target_drop <clientId> <name> <qty>
-                                    local parts = string.split(action, " ")
-                                    if parts[2] == clientId then
-                                        -- Item names can contain spaces, e.g. "Raw Iron". Treat the last token as qty.
-                                        local qty = parts[#parts]
-                                        local name = table.concat(parts, " ", 3, math.max(3, #parts - 1))
-                                        dropItemByName(name, qty)
-                                    end
-                                    return true
-                                end
-                                
-                                if string.sub(action, 1, 5) == "bring" then
-                                    stopFollowing()
-                                    local coords = string.split(string.sub(action, 7), ",") -- Fixed index
-                                    if #coords == 3 then
-                                        local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
-                                        Movement.tweenTo(targetPos, { speedDiv = 50, minTime = 1, randomRadius = 3, yOffset = 1 })
-                                    end
-                                elseif string.sub(action, 1, 4) == "goto" then
-                                    print("[GOTO] Received command:", action)
-                                    stopFollowing()
-                                    local coords = string.split(string.sub(action, 6), ",") -- Fixed index
-                                    print("[GOTO] Coords:", coords[1], coords[2], coords[3])
-                                    if #coords == 3 then
-                                        local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
-                                        print("[GOTO] Target pos:", targetPos)
-                                        Movement.slideTo(targetPos)
-                                    end
-                                elseif string.sub(action, 1, 6) == "walkto" then
-                                    print("[WALKTO] Received command:", action)
-                                    stopFollowing()
-                                    local coords = string.split(string.sub(action, 8), ",") -- after "walkto "
-                                    print("[WALKTO] Coords:", coords[1], coords[2], coords[3])
-                                    if #coords == 3 then
-                                        local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
-                                        print("[WALKTO] Target pos:", targetPos)
-                                        Movement.walkTo(targetPos)
-                                    end
-                                elseif string.sub(action, 1, 8) == "pathfind" then
-                                    print("[PATHFIND] Received command:", action)
-                                    stopFollowing()
-                                    local coords = string.split(string.sub(action, 10), ",") -- after "pathfind "
-                                    print("[PATHFIND] Coords:", coords[1], coords[2], coords[3])
-                                    if #coords == 3 then
-                                        local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
-                                        print("[PATHFIND] Target pos:", targetPos)
-                                        Movement.pathfindTo(targetPos)
-                                    end
-                                elseif action == "cancel" then
-                                    -- "C" key no longer cancels preparing locally, but a server-issued
-                                    -- cancel should stop everything, including prepare loops.
-                                    stopPrepare()
-                                    Movement.cancelAll(false)
-                                elseif action == "jump" then
-                                    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
-                                        LocalPlayer.Character.Humanoid.Jump = true
-                                    end
-                                elseif string.sub(action, 1, 11) == "join_server" then
-                                    local args = string.split(string.sub(action, 13), " ")
-                                    if #args == 2 then
-                                        game:GetService("TeleportService"):TeleportToPlaceInstance(tonumber(args[1]), args[2], LocalPlayer)
-                                    end
-                                elseif action == "reset" then
-                                    if LocalPlayer.Character then LocalPlayer.Character:BreakJoints() end
-                                elseif string.sub(action, 1, 6) == "follow" then
-                                    local args = string.split(string.sub(action, 8), " ")
-                                    local userId = tonumber(args[1])
-                                    if userId then startFollowing(userId, args[2]) end
-                                elseif action == "stop_follow" then
-                                    stopFollowing()
-                                elseif string.sub(action, 1, 15) == "set_autojump " then
-                                    local enabledStr = string.sub(action, 16)
-                                    autoJumpEnabled = (enabledStr == "true")
-                                elseif action == "refresh_configs" then
-                                    fetchServerConfigs()
-                                elseif action == "reload" then
-                                    terminateScript()
-                                    loadstring(game:HttpGet(RELOAD_URL .. "?t=" .. os.time()))()
-                                    return -- Stop this thread
-                                elseif string.sub(action, 1, 17) == "formation_follow " then
-                                    -- Format: formation_follow <userId> <shape> <offsets_json>
-                                    local payload = string.sub(action, 18)
-                                    local userIdStr, shapeStr, offsetsJson = string.match(payload, "^(%S+)%s+(%S+)%s+(.+)$")
-                                    
-                                    if userIdStr and shapeStr and offsetsJson then
-                                        formationLeaderId = tonumber(userIdStr)
-                                        formationShape = shapeStr
-                                        formationMode = "Follow"
-                                        formationActive = true
-                                        
-                                        -- Parse offsets JSON
-                                        local success, offsetsData = pcall(function()
-                                            return HttpService:JSONDecode(offsetsJson)
-                                        end)
-                                        
-                                        if success and offsetsData then
-                                            formationOffsets = offsetsData
-                                            print("[FORMATION] Received " .. shapeStr .. " offsets for " .. userIdStr)
-                                        else
-                                            formationOffsets = nil
-                                            warn("[FORMATION] Failed to parse follow offsets")
-                                        end
-                                        
-                                        -- Start following in formation
-                                        if formationLeaderId then
-                                            startFollowing(formationLeaderId, formationShape)
-                                        end
-                                        
-                                        sendNotify("Formation", "Following " .. (userIdStr or "leader") .. " in " .. formationShape)
-                                    end
-                                elseif string.sub(action, 1, 7) == "voodoo " then
-                                    -- Format: voodoo <single|burst> <x,y,z>
-                                    local payload = string.sub(action, 8)
-                                    local mode, coordsStr = string.match(payload, "^(%S+)%s+(.+)$")
-                                    
-                                    if mode and coordsStr then
-                                        local coords = string.split(coordsStr, ",")
-                                        if #coords == 3 then
-                                            local targetPos = Vector3.new(tonumber(coords[1]), tonumber(coords[2]), tonumber(coords[3]))
-                                            local count = (mode == "burst") and 3 or 1
-                                            fireVoodoo(targetPos, count)
-                                            print("[VOODOO] " .. mode .. " fired at " .. tostring(targetPos))
-                                        end
-                                    end
-                                elseif string.sub(action, 1, 6) == "equip " then
-                                    local slot = tonumber(string.sub(action, 7))
-                                    if slot then
-                                        fireEquip(slot)
-                                        print("[EQUIP] Fired for slot " .. slot)
-                                    end
-                                elseif action == "unequip_all" then
-                                    for slot = 1, 6 do
-                                        fireInventoryStore(slot)
-                                        task.wait(0.05)
-                                    end
-                                    print("[UNEQUIP] All slots cleared to inventory")
-                                elseif string.sub(action, 1, 11) == "sync_equip " then
-                                    local toolName = string.sub(action, 12)
-                                    if toolName then
-                                        task.spawn(scanAndEquip, toolName)
-                                    end
-                                elseif string.sub(action, 1, 15) == "formation_goto " then
-                                    -- Format: formation_goto <x,y,z> <shape> <positions_json>
-                                    -- Positions calculated by commander
-                                    -- NOTE: This payload is "<coords> <shape> <json>" (3 tokens).
-                                    -- Using string.split + a wrong length check would drop the command.
-                                    -- Also, JSON may contain spaces, so capture the "rest of string" as JSON.
-                                    local payload = string.sub(action, 16)
-                                    local coordsStr, shapeStr, positionsJson = string.match(payload, "^(%S+)%s+(%S+)%s+(.+)$")
-                                    if coordsStr and shapeStr and positionsJson then
-                                        local coords = string.split(coordsStr, ",")
-                                        formationShape = shapeStr
-                                        formationMode = "Goto"
-                                        formationActive = true
-                                        
-                                        if #coords == 3 then
-                                            formationCenter = Vector3.new(
-                                                tonumber(coords[1]),
-                                                tonumber(coords[2]),
-                                                tonumber(coords[3])
-                                            )
-                                            
-                                            -- Parse positions JSON from commander (via server)
-                                            if positionsJson then
-                                                local success, positionsData = pcall(function()
-                                                    return HttpService:JSONDecode(positionsJson)
-                                                end)
-                                                
-                                                if success and positionsData and positionsData[clientId] then
-                                                    -- Commander assigned us a specific position
-                                                    local myPos = positionsData[clientId]
-                                                    local targetPos = Vector3.new(myPos.x, myPos.y, myPos.z)
-                                                    
-                                                    -- Move to assigned position
-                                                    stopFollowing()
-                                                    Movement.walkTo(targetPos)
-                                                    
-                                                    sendNotify("Formation", "Walking to assigned " .. formationShape .. " position")
-                                                else
-                                                    sendNotify("Formation", "No position assigned by commander")
-                                                end
-                                            end
-                                        end
-                                    end
-                                elseif action == "formation_clear" then
-                                    formationActive = false
-                                    formationMode = "Follow"
-                                    formationShape = "Line"
-                                    formationLeaderId = nil
-                                    formationCenter = nil
-                                    stopFollowing()
-                                    stopGotoWalk()
-                                    stopMoveTween()
-                                    clearHolographicCubes()
-                                    sendNotify("Formation", "Formation cleared")
-                                elseif action == "rejoin" then
-                                    game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
-                                elseif action == "spawn" then
-                                    task.spawn(function()
-                                        local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
-                                        local playButton = playerGui and playerGui:FindFirstChild("SpawnGui", true) 
-                                            and playerGui.SpawnGui:FindFirstChild("Customization", true)
-                                            and playerGui.SpawnGui.Customization:FindFirstChild("PlayButton", true)
-                                        
-                                        if playButton and playButton:IsA("TextButton") then
-                                            if firesignal then
-                                                firesignal(playButton.MouseButton1Click)
-                                                firesignal(playButton.Activated)
-                                            end
-                                            pcall(function() playButton:Activate() end)
-                                            sendNotify("Army", "Spawn button clicked")
-                                        else
-                                            sendNotify("Army", "Spawn button not found")
-                                        end
-                                    end)
-                                end
-                            end)
-                            if not execResult then
-                                warn("[ARMY] Command failed:", action, execError)
-                            end
-                            acknowledgeCommand(commandId, execResult, execError)
-                        else
-                            -- Commander is ignoring server orders (or it's a wait/no-op).
-                            -- Still ACK so the server doesn't keep replaying the same command forever.
-                            acknowledgeCommand(commandId, true, nil)
-                        end
-                    end)
-                end
-            end
-        end
-    end
-    task.wait(currentPollRate)
 end
 
 sendNotify("Army Script", "Script Terminated")
