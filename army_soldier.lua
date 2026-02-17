@@ -93,6 +93,48 @@ end
 -- Call initialization immediately
 initPacketIds()
 
+-- Projectile Constants (Ported from aim_assist.lua)
+local PROJECTILE_VELOCITIES = {
+    ["Bow"] = 570,
+    ["Crossbow"] = 640,
+    ["Cannon"] = 1280,
+    ["Ballista"] = 1550
+}
+local PROJECTILE_OFFSETS = {
+    ["Bow"] = 1,
+    ["Crossbow"] = 1,
+    ["Cannon"] = 0,
+    ["Ballista"] = 0
+}
+local TOF_MULTIPLIERS = {
+    ["Bow"] = 1.30,      -- 3.86s / 2.71s
+    ["Crossbow"] = 1.20, -- 1.95s / 1.49s
+    ["Cannon"] = 1.36,   -- 1.00s / 0.735s
+    ["Ballista"] = 1.30  -- 0.82s / 0.61s
+}
+local PREDICT_GRAVITY = 196.2
+
+-- Trajectory solver
+local function solveTrajectory(origin, target, v, g)
+    local vec = target - origin
+    local dx = math.sqrt(vec.X^2 + vec.Z^2)
+    local dy = vec.Y
+    
+    local v2 = v * v
+    -- Quadratic term: v^4 - g(g*x^2 + 2*y*v^2)
+    local term = v2^2 - g * (g * dx^2 + 2 * dy * v2)
+    
+    if term < 0 then
+        return nil -- Out of range
+    end
+    
+    local root = math.sqrt(term)
+    -- Calculate lower angle (direct shot)
+    local angle = math.atan((v2 - root) / (g * dx))
+    
+    return angle
+end
+
 local function isAutoJumpActive()
     return autoJumpEnabled or (autoJumpForceCount > 0) or (followConnection ~= nil)
 end
@@ -167,6 +209,9 @@ local formationIndex = nil -- This client's assigned index in formation
 local formationActive = false
 local formationLeaderId = nil
 local formationOffsets = nil -- Map of userId -> {x, y, z} relative offsets
+local projectileActive = false
+local projectileWeapon = nil
+local projectileTarget = nil -- Player object to track (like aim_assist.lua)
 local farmToken = 0
 local routeToken = 0
 local routePrevAutoJump = nil -- restore user's setting after route ends/cancels
@@ -252,6 +297,69 @@ task.spawn(function()
                     if isValidHit(check1) or isValidHit(check2) then
                         hum.Jump = true
                     end
+                end
+            end
+        end
+    end
+end)
+
+-- Projectile Aiming Loop
+task.spawn(function()
+    local rs = RunService.RenderStepped
+    while isRunning do
+        rs:Wait()
+        if projectileActive and projectileTarget and projectileWeapon then
+            -- EXACT copy of aim_assist.lua aiming logic (lines 145-211)
+            -- Track the player's head dynamically
+            if projectileTarget.Character and projectileTarget.Character:FindFirstChild("Head") and projectileTarget.Character:FindFirstChild("HumanoidRootPart") then
+                local targetHead = projectileTarget.Character.Head
+                local targetPos = targetHead.Position
+                local currentPos = workspace.CurrentCamera.CFrame.Position
+                
+                local v = PROJECTILE_VELOCITIES[projectileWeapon] or 580
+                
+                -- Target Prediction
+                -- Calculate Time of Flight (ToF) approx: t = dist / v
+                local dist = (targetPos - currentPos).Magnitude
+                
+                -- Apply Drag Multiplier to ToF
+                local tofMult = TOF_MULTIPLIERS[projectileWeapon] or 1
+                local tof = (dist / v) * tofMult
+                
+                -- Refine ToF with one iteration (since moving target changes distance)
+                local targetVel = projectileTarget.Character.HumanoidRootPart.AssemblyLinearVelocity
+                local futurePosApprox = targetPos + (targetVel * tof)
+                local dist2 = (futurePosApprox - currentPos).Magnitude
+                local tof2 = (dist2 / v) * tofMult
+                
+                local predictedPos = targetPos + (targetVel * tof2)
+                
+                -- Calculate yaw (horizontal look-at)
+                -- Apply dynamic offset relative to camera view looking at PREDICTED position
+                local rawLookCFrame = CFrame.lookAt(currentPos, predictedPos)
+                local offsetAmount = PROJECTILE_OFFSETS[projectileWeapon] or 0
+                local offsetVec = -rawLookCFrame.RightVector * offsetAmount
+                
+                local adjustedTargetPos = predictedPos + offsetVec
+                local lookAtPos = Vector3.new(adjustedTargetPos.X, currentPos.Y, adjustedTargetPos.Z)
+                
+                local baseCFrame = CFrame.lookAt(currentPos, lookAtPos)
+                
+                -- Calculate pitch (vertical angle) using original distance? 
+                -- No, use adjusted distance so the projectile lands at the offset point.
+                
+                -- Launch Offset: Projectile starts lower than camera (approx 1.5 studs)
+                local launchOrigin = currentPos - Vector3.new(0, 1.5, 0)
+                
+                local v = PROJECTILE_VELOCITIES[projectileWeapon] or 580
+                local theta = solveTrajectory(launchOrigin, adjustedTargetPos, v, PREDICT_GRAVITY)
+                
+                if theta then
+                    -- Apply pitch
+                    workspace.CurrentCamera.CFrame = baseCFrame * CFrame.Angles(theta, 0, 0)
+                else
+                    -- If out of range, just look at them directly (0 pitch relative to base)
+                    workspace.CurrentCamera.CFrame = CFrame.lookAt(currentPos, targetPos)
                 end
             end
         end
@@ -1050,6 +1158,68 @@ local function handleActionData(data)
                         fireVoodoo(targetPos, count)
                     end
                 end
+            elseif string.sub(action, 1, 16) == "projectile_init " then
+                local weapon = string.sub(action, 17)
+                projectileWeapon = weapon
+                projectileActive = false
+                projectileTarget = nil
+                
+                if weapon == "Bow" or weapon == "Crossbow" then
+                    task.spawn(scanAndEquip, weapon)
+                end
+                sendNotify("Projectile", "Prepared " .. weapon)
+
+            elseif string.sub(action, 1, 15) == "projectile_aim " then
+                local userIdStr = string.sub(action, 16)
+                local userId = tonumber(userIdStr)
+                if userId then
+                    -- Find the player by UserId
+                    local targetPlayer = nil
+                    for _, player in ipairs(Players:GetPlayers()) do
+                        if player.UserId == userId then
+                            targetPlayer = player
+                            break
+                        end
+                    end
+                    
+                    if targetPlayer then
+                        projectileTarget = targetPlayer
+                        projectileActive = true
+                        
+                        -- Set first-person zoom when aiming starts (like aim_assist.lua)
+                        LocalPlayer.CameraMaxZoomDistance = 0.5
+                        LocalPlayer.CameraMinZoomDistance = 0.5
+                        
+                        -- Press and hold mouse1 (like aim_assist.lua startTracking)
+                        if mouse1press then
+                            mouse1press()
+                        else
+                            VirtualUser:Button1Down(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+                        end
+                    end
+                end
+
+            elseif action == "projectile_fire" then
+                 if projectileActive and projectileTarget then
+                    task.spawn(function()
+                        -- Release mouse1 (like aim_assist.lua stopTracking)
+                        if mouse1release then
+                            mouse1release()
+                        else
+                            VirtualUser:Button1Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+                        end
+                        
+                        -- Restore zoom
+                        task.wait(0.1) -- Small delay to ensure shot fires
+                        local preMaxZoom = 400 -- Default Roblox value
+                        local preMinZoom = 0.5
+                        LocalPlayer.CameraMaxZoomDistance = preMaxZoom
+                        LocalPlayer.CameraMinZoomDistance = preMinZoom
+                        
+                        projectileActive = false
+                        projectileTarget = nil
+                    end)
+                end
             elseif string.sub(action, 1, 6) == "equip " then
                 local slot = tonumber(string.sub(action, 7))
                 if slot then fireEquip(slot) end
@@ -1061,11 +1231,6 @@ local function handleActionData(data)
             elseif string.sub(action, 1, 11) == "sync_equip " then
                 local toolName = string.sub(action, 12)
                 if toolName then task.spawn(scanAndEquip, toolName) end
-            elseif string.sub(action, 1, 8) == "prepare " then
-                local toolName = string.sub(action, 9)
-                if toolName then startPrepareTool(toolName) end
-            elseif action == "stop_prepare" then
-                stopPrepare()
             elseif string.sub(action, 1, 15) == "formation_goto " then
                 local payload = string.sub(action, 16)
                 local coordsStr, shapeStr, positionsJson = string.match(payload, "^(%S+)%s+(%S+)%s+(.+)$")
@@ -1233,25 +1398,6 @@ stopFarming = function()
     farmToken = farmToken + 1
     isFarming = false
     stopGotoWalk()
-end
-
-local preparedTool = nil
-startPrepareTool = function(toolName)
-    if not toolName or toolName == "" then return end
-    print("[PREPARE] Ensuring tool is ready: " .. toolName)
-    preparedTool = toolName
-    
-    local success = scanAndEquip(toolName)
-    if success then
-        sendNotify("Prepare", "Tool '" .. toolName .. "' is ready for action")
-    else
-        sendNotify("Prepare", "Failed to find or equip '" .. toolName .. "'")
-    end
-end
-
-stopPrepare = function()
-    preparedTool = nil
-    sendNotify("Prepare", "Tool preparation released")
 end
 
 stopRoute = function()
@@ -3104,19 +3250,15 @@ scanAndEquip = function(toolName)
     
     local targetName = toolName:lower()
     
-    -- Phase 0: Fast check - is it already equipped?
+    -- Clear current title at start of flow for fresh verification
     local toolbarContainer = LocalPlayer.PlayerGui:FindFirstChild("MainGui", true)
         and LocalPlayer.PlayerGui.MainGui:FindFirstChild("Panels", true)
         and LocalPlayer.PlayerGui.MainGui.Panels:FindFirstChild("Toolbar", true)
         and LocalPlayer.PlayerGui.MainGui.Panels.Toolbar:FindFirstChild("Container", true)
     local toolbarTitle = toolbarContainer and toolbarContainer:FindFirstChild("Title", true)
-    
-    if toolbarTitle and toolbarTitle.Text:lower():find(targetName, 1, true) then
-        print("[SCAN] Tool already equipped (Fast check)")
-        return true
-    end
+    if toolbarTitle then toolbarTitle.Text = "" end
 
-    -- Phase 1: Search Inventory
+    -- Phase 1: Search Inventory FIRST
     print("[SCAN] Phase 1: Searching Inventory for: " .. toolName)
     local inventoryList = LocalPlayer.PlayerGui:FindFirstChild("MainGui", true)
         and LocalPlayer.PlayerGui.MainGui:FindFirstChild("RightPanel", true)
@@ -3130,10 +3272,18 @@ scanAndEquip = function(toolName)
                 print("[SCAN] Found in Inventory! Order: " .. order .. ". Firing UseBagItem Remote (43)")
                 fireInventoryUse(order)
                 
-                -- ARMOR FRIENDLY: Return true immediately once seen in inventory.
-                -- This handles items that disappear from lists (armor, consumables).
-                print("[SCAN] Once-seen rule: Success triggered via Inventory use")
-                return true
+                -- Wait 2 seconds and verify it's now in the toolbar
+                print("[SCAN] Waiting 2s for inventory -> toolbar move...")
+                task.wait(2)
+                print("[SCAN] Verifying toolbar placement...")
+                local verifiedSlot = performToolbarScan(targetName)
+                if verifiedSlot then
+                    print("[SCAN] Verification success: Tool now in slot " .. verifiedSlot)
+                    return true
+                else
+                    print("[SCAN] Verification failed: Tool not found in toolbar after use")
+                end
+                -- Fallthrough to toolbar scan if inventory use didn't result in equip
             end
         end
     end
@@ -3628,7 +3778,7 @@ startFarmingTarget = function(targetPos, targetId)
             local edgePoint = findEdgePointRaycast(targetObject, currentPos)
             local dist2D = (Vector2.new(currentPos.X, currentPos.Z) - Vector2.new(edgePoint.X, edgePoint.Z)).Magnitude
             
-            if dist2D > 6 then
+            if dist2D > 10 then
                 -- Only call walkTo if we aren't already moving there or periodically to refresh
                 if moveTarget ~= edgePoint or os.clock() - lastMoveToCall > 2 then
                     lastMoveToCall = os.clock()
@@ -3744,7 +3894,7 @@ startFarmingList = function(targetIds)
                         -- Simple distance check
                         local dist = (root.Position - targetPart.Position).Magnitude
                         
-                        if dist > 6 then
+                        if dist > 10 then
                             if os.clock() - lastMoveToCall > 1 then
                                 lastMoveToCall = os.clock()
                                 Movement.walkTo(targetPart.Position)
@@ -4530,6 +4680,130 @@ local function showWhoisDialog()
             statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
         end
     end)
+end
+
+local function showFireButton()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return end
+    
+    if pg:FindFirstChild("ArmyFireButton") then pg.ArmyFireButton:Destroy() end
+    
+    local screenGui = Instance.new("ScreenGui", pg)
+    screenGui.Name = "ArmyFireButton"
+    screenGui.ResetOnSpawn = false
+    
+    local btn = Instance.new("TextButton", screenGui)
+    btn.Size = UDim2.new(0, 120, 0, 60)
+    btn.Position = UDim2.new(0.5, -60, 0.85, 0)
+    btn.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
+    btn.Text = "FIRE"
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.Font = Enum.Font.GothamBlack
+    btn.TextSize = 24
+    
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
+    Instance.new("UIStroke", btn).Color = Color3.fromRGB(255, 200, 200)
+    Instance.new("UIStroke", btn).Thickness = 2
+    
+    btn.MouseButton1Click:Connect(function()
+        sendCommand("projectile_fire")
+        sendNotify("Projectile", "FIRING!")
+        screenGui:Destroy()
+    end)
+end
+
+local function showProjectileDialog()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return end
+    
+    if pg:FindFirstChild("ArmyProjectileDialog") then pg.ArmyProjectileDialog:Destroy() end
+    
+    local screenGui = Instance.new("ScreenGui", pg)
+    screenGui.Name = "ArmyProjectileDialog"
+    screenGui.ResetOnSpawn = false
+    
+    local panel = Instance.new("Frame", screenGui)
+    panel.Size = UDim2.new(0, 300, 0, 320)
+    panel.Position = UDim2.new(0.5, -150, 0.5, -160)
+    panel.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+    panel.BorderSizePixel = 0
+    Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 12)
+    Instance.new("UIStroke", panel).Color = Color3.fromRGB(60, 60, 70)
+    
+    local header = Instance.new("Frame", panel)
+    header.Size = UDim2.new(1, 0, 0, 50)
+    header.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+    header.BorderSizePixel = 0
+    Instance.new("UICorner", header)
+    
+    local title = Instance.new("TextLabel", header)
+    title.Size = UDim2.new(1, -50, 1, 0)
+    title.Position = UDim2.new(0, 15, 0, 0)
+    title.BackgroundTransparency = 1
+    title.Text = "SELECT PROJECTILE"
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.TextSize = 16
+    title.Font = Enum.Font.GothamBold
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    
+    local close = Instance.new("TextButton", header)
+    close.Size = UDim2.new(0, 30, 0, 30)
+    close.Position = UDim2.new(1, -40, 0, 10)
+    close.BackgroundTransparency = 1
+    close.Text = "X"
+    close.TextColor3 = Color3.fromRGB(200, 200, 200)
+    close.TextSize = 18
+    close.Font = Enum.Font.GothamBold
+    close.MouseButton1Click:Connect(function() screenGui:Destroy() end)
+
+    local content = Instance.new("ScrollingFrame", panel)
+    content.Size = UDim2.new(1, -20, 1, -60)
+    content.Position = UDim2.new(0, 10, 0, 60)
+    content.BackgroundTransparency = 1
+    content.BorderSizePixel = 0
+    content.ScrollBarThickness = 2
+    
+    local list = Instance.new("UIListLayout", content)
+    list.Padding = UDim.new(0, 8)
+
+    local weapons = {"Bow", "Crossbow", "Cannon", "Ballista"}
+    
+    for _, weapon in ipairs(weapons) do
+        local btn = Instance.new("TextButton", content)
+        btn.Size = UDim2.new(1, 0, 0, 40)
+        btn.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
+        btn.Text = weapon
+        btn.TextColor3 = Color3.fromRGB(220, 220, 220)
+        btn.Font = Enum.Font.GothamBold
+        btn.TextSize = 14
+        Instance.new("UICorner", btn)
+
+        btn.MouseButton1Click:Connect(function()
+            screenGui:Destroy()
+            -- Commander logic:
+            sendCommand("projectile_init " .. weapon)
+            sendNotify("Projectile", "Initialized " .. weapon .. " - Press 'F' to aim")
+            
+            setPendingClick(UserInputService.InputBegan:Connect(function(input, processed)
+                if processed then return end
+                if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == Enum.KeyCode.F then
+                    -- Find player under mouse cursor
+                    local target = Mouse.Target
+                    if target then
+                        local targetPlayer = Players:GetPlayerFromCharacter(target.Parent)
+                        if targetPlayer and targetPlayer ~= LocalPlayer then
+                            sendCommand("projectile_aim " .. tostring(targetPlayer.UserId))
+                            sendNotify("Projectile", "Locked onto " .. targetPlayer.Name .. " - Click 'FIRE' to shoot")
+                            cancelPendingClick()
+                            showFireButton()
+                        else
+                            sendNotify("Projectile", "No player found under cursor")
+                        end
+                    end
+                end
+            end), nil)
+        end)
+    end
 end
 
 -- Create Modern Sidebar Panel
@@ -6081,6 +6355,13 @@ local function createPanel()
             Icon = "👺",
             Color = Color3.fromRGB(255, 100, 50),
             Buttons = {
+                {
+                    Text = "Projectile",
+                    Color = Color3.fromRGB(255, 50, 50),
+                    Callback = function()
+                        showProjectileDialog()
+                    end
+                },
                 {
                     Text = "Spawn",
                     Color = Color3.fromRGB(100, 255, 100),
