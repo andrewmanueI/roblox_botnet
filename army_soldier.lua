@@ -1190,24 +1190,18 @@ local function handleActionData(data)
                         LocalPlayer.CameraMaxZoomDistance = 0.5
                         LocalPlayer.CameraMinZoomDistance = 0.5
                         
-                        -- Press and hold mouse1 (like aim_assist.lua startTracking)
-                        if mouse1press then
-                            mouse1press()
-                        else
-                            VirtualUser:Button1Down(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
-                        end
+                        -- Press and hold mouse1 using VirtualInputManager (works on mobile!)
+                        local VIM = game:GetService("VirtualInputManager")
+                        VIM:SendMouseButtonEvent(0, 0, 0, true, game, 0)
                     end
                 end
 
             elseif action == "projectile_fire" then
                  if projectileActive and projectileTarget then
                     task.spawn(function()
-                        -- Release mouse1 (like aim_assist.lua stopTracking)
-                        if mouse1release then
-                            mouse1release()
-                        else
-                            VirtualUser:Button1Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
-                        end
+                        -- Release mouse1 using VirtualInputManager (works on mobile!)
+                        local VIM = game:GetService("VirtualInputManager")
+                        VIM:SendMouseButtonEvent(0, 0, 0, false, game, 0)
                         
                         -- Restore zoom
                         task.wait(0.1) -- Small delay to ensure shot fires
