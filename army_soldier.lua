@@ -212,6 +212,7 @@ local formationOffsets = nil -- Map of userId -> {x, y, z} relative offsets
 local projectileActive = false
 local projectileWeapon = nil
 local projectileTarget = nil -- Player object to track (like aim_assist.lua)
+local projectileLaunchOffset = 1.5 -- Vertical offset (studs) to launch from below camera. Adjustable at runtime.
 local farmToken = 0
 local routeToken = 0
 local routePrevAutoJump = nil -- restore user's setting after route ends/cancels
@@ -349,7 +350,7 @@ task.spawn(function()
                 -- No, use adjusted distance so the projectile lands at the offset point.
                 
                 -- Launch Offset: Projectile starts lower than camera (approx 1.5 studs)
-                local launchOrigin = currentPos - Vector3.new(0, 1.5, 0)
+                local launchOrigin = currentPos - Vector3.new(0, projectileLaunchOffset, 0)
                 
                 local v = PROJECTILE_VELOCITIES[projectileWeapon] or 580
                 local theta = solveTrajectory(launchOrigin, adjustedTargetPos, v, PREDICT_GRAVITY)
@@ -1168,6 +1169,14 @@ local function handleActionData(data)
                     task.spawn(scanAndEquip, weapon)
                 end
                 sendNotify("Projectile", "Prepared " .. weapon)
+
+            elseif string.sub(action, 1, 16) == "projectile_set_y" then
+                local yStr = string.sub(action, 18)
+                local yVal = tonumber(yStr)
+                if yVal then
+                    projectileLaunchOffset = yVal
+                    sendNotify("Projectile", "Set Launch Offset Y: " .. yVal)
+                end
 
             elseif string.sub(action, 1, 15) == "projectile_aim " then
                 local userIdStr = string.sub(action, 16)
