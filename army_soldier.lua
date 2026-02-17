@@ -43,6 +43,12 @@ local autoJumpForceCount = 0 -- temporary override while slide/walk movement is 
 -- Packet IDs - Populated dynamically at runtime from ByteNet
 local PacketIds = {}
 
+-- Helper to detect mobile device
+local function isMobile()
+    local UserInputService = game:GetService("UserInputService")
+    return UserInputService.TouchEnabled and not UserInputService.MouseEnabled
+end
+
 -- Initialize all packet IDs dynamically
 local function initPacketIds()
     local success, boogaData = pcall(function()
@@ -212,7 +218,6 @@ local formationOffsets = nil -- Map of userId -> {x, y, z} relative offsets
 local projectileActive = false
 local projectileWeapon = nil
 local projectileTarget = nil -- Player object to track (like aim_assist.lua)
-local projectileLaunchOffset = 1.5 -- Vertical offset (studs) to launch from below camera. Adjustable at runtime.
 local farmToken = 0
 local routeToken = 0
 local routePrevAutoJump = nil -- restore user's setting after route ends/cancels
@@ -339,6 +344,7 @@ task.spawn(function()
                 -- Apply dynamic offset relative to camera view looking at PREDICTED position
                 local rawLookCFrame = CFrame.lookAt(currentPos, predictedPos)
                 local offsetAmount = PROJECTILE_OFFSETS[projectileWeapon] or 0
+                
                 local offsetVec = -rawLookCFrame.RightVector * offsetAmount
                 
                 local adjustedTargetPos = predictedPos + offsetVec
@@ -349,8 +355,17 @@ task.spawn(function()
                 -- Calculate pitch (vertical angle) using original distance? 
                 -- No, use adjusted distance so the projectile lands at the offset point.
                 
-                -- Launch Offset: Projectile starts lower than camera (approx 1.5 studs)
-                local launchOrigin = currentPos - Vector3.new(0, projectileLaunchOffset, 0)
+                -- Launch Offset: Projectile starts lower than camera
+                -- Mobile usually needs less offset due to different camera/character handling? 
+                -- or maybe MORE offset? Let's use calibration variables.
+                -- Default: PC = 1.5, Mobile = 1.5 (User can tune)
+                
+                local yOffset = 1.5
+                if isMobile() then
+                    yOffset = 0 -- Placeholder for future tuning if needed
+                end
+                
+                local launchOrigin = currentPos - Vector3.new(0, yOffset, 0)
                 
                 local v = PROJECTILE_VELOCITIES[projectileWeapon] or 580
                 local theta = solveTrajectory(launchOrigin, adjustedTargetPos, v, PREDICT_GRAVITY)
@@ -1169,70 +1184,6 @@ local function handleActionData(data)
                     task.spawn(scanAndEquip, weapon)
                 end
                 sendNotify("Projectile", "Prepared " .. weapon)
-
-            elseif string.sub(action, 1, 16) == "projectile_set_y" then
-                local yStr = string.sub(action, 18)
-                local yVal = tonumber(yStr)
-                if yVal then
-                    projectileLaunchOffset = yVal
-                    sendNotify("Projectile", "Set Launch Offset Y: " .. yVal)
-                end
-
-            elseif string.sub(action, 1, 18) == "projectile_set_vel" then
-                local vStr = string.sub(action, 20)
-                local vVal = tonumber(vStr)
-                if vVal then
-                    -- Update all velocities relative to Bow (simple scaling) or just set all?
-                    -- For simplicity, let's just shift ALL by the difference, or set base if we want strict control.
-                    -- User asked for + / - buttons, so shifting is safer to preserve relative differences commands.
-                    -- Actually, the button sends exact value, so let's just update the current weapon or all if none.
-                    
-                    -- Wait, the button sends (current - 10). If we just set that, it might desync if weapons differ.
-                    -- Let's just shift all velocities by the delta from the *current* weapon's old val.
-                    -- Or simpler: Just update all consistent with the button logic?
-                    
-                    -- User wants +/-, so let's just assume we are tuning the CURRENT weapon primarily.
-                    -- But to keep it simple across clients who might hold different weapons:
-                    -- Let's just update ALL velocities by the delta (new - old_bow).
-                    local oldBow = PROJECTILE_VELOCITIES["Bow"]
-                    local delta = vVal - oldBow -- Assuming the command sent the new Bow velocity
-                    
-                    -- Actually, the UI sends (currentWeaponVel +/- 10). 
-                    -- Let's just apply the change to ALL weapons to keep relative balance.
-                    -- If we are holding Bow (580) and send 590:
-                    -- Bow becomes 590. Crossbow (640) should become 650.
-                    
-                    -- To do this cleanly, the command should probably be "projectile_shift_vel +10".
-                    -- But since I implemented "set_vel [value]", i'll stick to that but interpret it.
-                    -- EXCEPT: The UI sends specific value. If I am holding Cannon (1280) and send 1290...
-                    -- ...and another bot is holding Bow (580)... checking "Bow" vs 1290 is huge jump.
-                    
-                    -- FIX: Let's change the button to send "projectile_shift_vel 10" or "-10".
-                    -- But for now, let's just update the specific weapon if active, otherwise all?
-                    -- Re-reading request: "4 buttons for - + velocity".
-                    
-                    -- Simplest stable approach: Just update ALL velocities by the same +/- 10 if we can detect direction.
-                    -- But command receives Absolute Value. 
-                    
-                    -- Let's just update the specific keys to the new value if it matches reasonably?
-                    -- No, let's just assume we are calibrating the BASE velocity (Bow) and scale others?
-                    
-                    -- Ok, I'll allow "projectile_set_vel" to just set the Bow velocity, and shift others?
-                    -- Or better: Update the UI to send "projectile_shift_vel 10".
-                    
-                    -- Let's update the command handler to support explicit "set" for now (as implemented in UI).
-                    -- If the value is close to one of them, update that one.
-                     for k,v in pairs(PROJECTILE_VELOCITIES) do
-                        if projectileWeapon and k == projectileWeapon then
-                             PROJECTILE_VELOCITIES[k] = vVal
-                        elseif not projectileWeapon then
-                             -- If no weapon, update all? No, that messes up ratios.
-                             -- Let's just update Bow as baseline.
-                             if k == "Bow" then PROJECTILE_VELOCITIES[k] = vVal end
-                        end
-                    end
-                    sendNotify("Projectile", "Set Velocity: " .. vVal)
-                end
 
             elseif string.sub(action, 1, 15) == "projectile_aim " then
                 local userIdStr = string.sub(action, 16)
@@ -4863,107 +4814,6 @@ local function showProjectileDialog()
             end), nil)
         end)
     end
-
-    -- Calibration UI
-    local calibFrame = Instance.new("Frame", content)
-    calibFrame.Size = UDim2.new(1, 0, 0, 80)
-    calibFrame.BackgroundTransparency = 1
-    
-    -- Velocity Control
-    local velRow = Instance.new("Frame", calibFrame)
-    velRow.Size = UDim2.new(1, 0, 0, 35)
-    velRow.Position = UDim2.new(0, 0, 0, 0)
-    velRow.BackgroundTransparency = 1
-    
-    local velLabel = Instance.new("TextLabel", velRow)
-    velLabel.Size = UDim2.new(0.4, 0, 1, 0)
-    velLabel.Position = UDim2.new(0.3, 0, 0, 0)
-    velLabel.BackgroundTransparency = 1
-    velLabel.Text = "Vel: 580"
-    velLabel.TextColor3 = Color3.new(1,1,1)
-    
-    local velDown = Instance.new("TextButton", velRow)
-    velDown.Size = UDim2.new(0.25, 0, 1, 0)
-    velDown.BackgroundColor3 = Color3.fromRGB(60, 40, 40)
-    velDown.Text = "-"
-    velDown.TextColor3 = Color3.new(1,1,1)
-    Instance.new("UICorner", velDown)
-    
-    local velUp = Instance.new("TextButton", velRow)
-    velUp.Size = UDim2.new(0.25, 0, 1, 0)
-    velUp.Position = UDim2.new(0.75, 0, 0, 0)
-    velUp.BackgroundColor3 = Color3.fromRGB(40, 60, 40)
-    velUp.Text = "+"
-    velUp.TextColor3 = Color3.new(1,1,1)
-    Instance.new("UICorner", velUp)
-    
-    -- Offset Control
-    local offRow = Instance.new("Frame", calibFrame)
-    offRow.Size = UDim2.new(1, 0, 0, 35)
-    offRow.Position = UDim2.new(0, 0, 0, 40)
-    offRow.BackgroundTransparency = 1
-    
-    local offLabel = Instance.new("TextLabel", offRow)
-    offLabel.Size = UDim2.new(0.4, 0, 1, 0)
-    offLabel.Position = UDim2.new(0.3, 0, 0, 0)
-    offLabel.BackgroundTransparency = 1
-    offLabel.Text = "OffY: " .. projectileLaunchOffset
-    offLabel.TextColor3 = Color3.new(1,1,1)
-    
-    local offDown = Instance.new("TextButton", offRow)
-    offDown.Size = UDim2.new(0.25, 0, 1, 0)
-    offDown.BackgroundColor3 = Color3.fromRGB(60, 40, 40)
-    offDown.Text = "-"
-    offDown.TextColor3 = Color3.new(1,1,1)
-    Instance.new("UICorner", offDown)
-    
-    local offUp = Instance.new("TextButton", offRow)
-    offUp.Size = UDim2.new(0.25, 0, 1, 0)
-    offUp.Position = UDim2.new(0.75, 0, 0, 0)
-    offUp.BackgroundColor3 = Color3.fromRGB(40, 60, 40)
-    offUp.Text = "+"
-    offUp.TextColor3 = Color3.new(1,1,1)
-    Instance.new("UICorner", offUp)
-
-    -- Button Logic
-    local function updateLabels()
-        local currentVel = PROJECTILE_VELOCITIES["Bow"] -- Default to Bow for UI
-        if projectileWeapon then currentVel = PROJECTILE_VELOCITIES[projectileWeapon] end
-        velLabel.Text = "Vel: " .. (currentVel or "???")
-        offLabel.Text = "OffY: " .. string.format("%.1f", projectileLaunchOffset)
-    end
-    
-    velDown.MouseButton1Click:Connect(function()
-        local currentVel = PROJECTILE_VELOCITIES["Bow"]
-        if projectileWeapon then currentVel = PROJECTILE_VELOCITIES[projectileWeapon] end
-        if currentVel then
-            sendCommand("projectile_set_vel " .. (currentVel - 10))
-        end
-    end)
-    
-    velUp.MouseButton1Click:Connect(function()
-        local currentVel = PROJECTILE_VELOCITIES["Bow"]
-        if projectileWeapon then currentVel = PROJECTILE_VELOCITIES[projectileWeapon] end
-        if currentVel then
-            sendCommand("projectile_set_vel " .. (currentVel + 10))
-        end
-    end)
-    
-    offDown.MouseButton1Click:Connect(function()
-        sendCommand("projectile_set_y " .. string.format("%.1f", projectileLaunchOffset - 0.1))
-    end)
-    
-    offUp.MouseButton1Click:Connect(function()
-        sendCommand("projectile_set_y " .. string.format("%.1f", projectileLaunchOffset + 0.1))
-    end)
-    
-    -- Periodic update to reflect changes from commands
-    task.spawn(function()
-        while calibFrame.Parent do
-            updateLabels()
-            task.wait(0.5)
-        end
-    end)
 end
 
 -- Create Modern Sidebar Panel
