@@ -362,7 +362,7 @@ task.spawn(function()
                 
                 local yOffset = 1.5
                 if isMobile() then
-                    yOffset = 0 -- Placeholder for future tuning if needed
+                    yOffset = 3 -- Placeholder for future tuning if needed
                 end
                 
                 local launchOrigin = currentPos - Vector3.new(0, yOffset, 0)
