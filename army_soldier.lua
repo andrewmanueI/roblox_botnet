@@ -107,10 +107,10 @@ local PROJECTILE_OFFSETS = {
     ["Ballista"] = 0
 }
 local TOF_MULTIPLIERS = {
-    ["Bow"] = 1.30,      -- 3.86s / 2.71s
-    ["Crossbow"] = 1.20, -- 1.95s / 1.49s
-    ["Cannon"] = 1.36,   -- 1.00s / 0.735s
-    ["Ballista"] = 1.30  -- 0.82s / 0.61s
+    ["Bow"] = 1.30, -- Based on 3.86s / 2.71s
+    ["Crossbow"] = 1.20, -- Based on 1.95s / 1.49s
+    ["Cannon"] = 1.20, -- Based on 1.00s / 0.735s
+    ["Ballista"] = 1.30 -- Based on 0.82s / 0.61s
 }
 local PREDICT_GRAVITY = 196.2
 
