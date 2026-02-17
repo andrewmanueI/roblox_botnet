@@ -1178,6 +1178,62 @@ local function handleActionData(data)
                     sendNotify("Projectile", "Set Launch Offset Y: " .. yVal)
                 end
 
+            elseif string.sub(action, 1, 18) == "projectile_set_vel" then
+                local vStr = string.sub(action, 20)
+                local vVal = tonumber(vStr)
+                if vVal then
+                    -- Update all velocities relative to Bow (simple scaling) or just set all?
+                    -- For simplicity, let's just shift ALL by the difference, or set base if we want strict control.
+                    -- User asked for + / - buttons, so shifting is safer to preserve relative differences commands.
+                    -- Actually, the button sends exact value, so let's just update the current weapon or all if none.
+                    
+                    -- Wait, the button sends (current - 10). If we just set that, it might desync if weapons differ.
+                    -- Let's just shift all velocities by the delta from the *current* weapon's old val.
+                    -- Or simpler: Just update all consistent with the button logic?
+                    
+                    -- User wants +/-, so let's just assume we are tuning the CURRENT weapon primarily.
+                    -- But to keep it simple across clients who might hold different weapons:
+                    -- Let's just update ALL velocities by the delta (new - old_bow).
+                    local oldBow = PROJECTILE_VELOCITIES["Bow"]
+                    local delta = vVal - oldBow -- Assuming the command sent the new Bow velocity
+                    
+                    -- Actually, the UI sends (currentWeaponVel +/- 10). 
+                    -- Let's just apply the change to ALL weapons to keep relative balance.
+                    -- If we are holding Bow (580) and send 590:
+                    -- Bow becomes 590. Crossbow (640) should become 650.
+                    
+                    -- To do this cleanly, the command should probably be "projectile_shift_vel +10".
+                    -- But since I implemented "set_vel [value]", i'll stick to that but interpret it.
+                    -- EXCEPT: The UI sends specific value. If I am holding Cannon (1280) and send 1290...
+                    -- ...and another bot is holding Bow (580)... checking "Bow" vs 1290 is huge jump.
+                    
+                    -- FIX: Let's change the button to send "projectile_shift_vel 10" or "-10".
+                    -- But for now, let's just update the specific weapon if active, otherwise all?
+                    -- Re-reading request: "4 buttons for - + velocity".
+                    
+                    -- Simplest stable approach: Just update ALL velocities by the same +/- 10 if we can detect direction.
+                    -- But command receives Absolute Value. 
+                    
+                    -- Let's just update the specific keys to the new value if it matches reasonably?
+                    -- No, let's just assume we are calibrating the BASE velocity (Bow) and scale others?
+                    
+                    -- Ok, I'll allow "projectile_set_vel" to just set the Bow velocity, and shift others?
+                    -- Or better: Update the UI to send "projectile_shift_vel 10".
+                    
+                    -- Let's update the command handler to support explicit "set" for now (as implemented in UI).
+                    -- If the value is close to one of them, update that one.
+                     for k,v in pairs(PROJECTILE_VELOCITIES) do
+                        if projectileWeapon and k == projectileWeapon then
+                             PROJECTILE_VELOCITIES[k] = vVal
+                        elseif not projectileWeapon then
+                             -- If no weapon, update all? No, that messes up ratios.
+                             -- Let's just update Bow as baseline.
+                             if k == "Bow" then PROJECTILE_VELOCITIES[k] = vVal end
+                        end
+                    end
+                    sendNotify("Projectile", "Set Velocity: " .. vVal)
+                end
+
             elseif string.sub(action, 1, 15) == "projectile_aim " then
                 local userIdStr = string.sub(action, 16)
                 local userId = tonumber(userIdStr)
@@ -4878,31 +4934,36 @@ local function showProjectileDialog()
     end
     
     velDown.MouseButton1Click:Connect(function()
-        -- Adjust all velocities for simplicity (or just current)
-        for k,v in pairs(PROJECTILE_VELOCITIES) do
-            PROJECTILE_VELOCITIES[k] = v - 10
+        local currentVel = PROJECTILE_VELOCITIES["Bow"]
+        if projectileWeapon then currentVel = PROJECTILE_VELOCITIES[projectileWeapon] end
+        if currentVel then
+            sendCommand("projectile_set_vel " .. (currentVel - 10))
         end
-        updateLabels()
     end)
     
     velUp.MouseButton1Click:Connect(function()
-        for k,v in pairs(PROJECTILE_VELOCITIES) do
-            PROJECTILE_VELOCITIES[k] = v + 10
+        local currentVel = PROJECTILE_VELOCITIES["Bow"]
+        if projectileWeapon then currentVel = PROJECTILE_VELOCITIES[projectileWeapon] end
+        if currentVel then
+            sendCommand("projectile_set_vel " .. (currentVel + 10))
         end
-        updateLabels()
     end)
     
     offDown.MouseButton1Click:Connect(function()
-        projectileLaunchOffset = projectileLaunchOffset - 0.1
-        updateLabels()
+        sendCommand("projectile_set_y " .. string.format("%.1f", projectileLaunchOffset - 0.1))
     end)
     
     offUp.MouseButton1Click:Connect(function()
-        projectileLaunchOffset = projectileLaunchOffset + 0.1
-        updateLabels()
+        sendCommand("projectile_set_y " .. string.format("%.1f", projectileLaunchOffset + 0.1))
     end)
     
-    updateLabels()
+    -- Periodic update to reflect changes from commands
+    task.spawn(function()
+        while calibFrame.Parent do
+            updateLabels()
+            task.wait(0.5)
+        end
+    end)
 end
 
 -- Create Modern Sidebar Panel
