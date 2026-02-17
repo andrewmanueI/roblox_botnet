@@ -4807,6 +4807,102 @@ local function showProjectileDialog()
             end), nil)
         end)
     end
+
+    -- Calibration UI
+    local calibFrame = Instance.new("Frame", content)
+    calibFrame.Size = UDim2.new(1, 0, 0, 80)
+    calibFrame.BackgroundTransparency = 1
+    
+    -- Velocity Control
+    local velRow = Instance.new("Frame", calibFrame)
+    velRow.Size = UDim2.new(1, 0, 0, 35)
+    velRow.Position = UDim2.new(0, 0, 0, 0)
+    velRow.BackgroundTransparency = 1
+    
+    local velLabel = Instance.new("TextLabel", velRow)
+    velLabel.Size = UDim2.new(0.4, 0, 1, 0)
+    velLabel.Position = UDim2.new(0.3, 0, 0, 0)
+    velLabel.BackgroundTransparency = 1
+    velLabel.Text = "Vel: 580"
+    velLabel.TextColor3 = Color3.new(1,1,1)
+    
+    local velDown = Instance.new("TextButton", velRow)
+    velDown.Size = UDim2.new(0.25, 0, 1, 0)
+    velDown.BackgroundColor3 = Color3.fromRGB(60, 40, 40)
+    velDown.Text = "-"
+    velDown.TextColor3 = Color3.new(1,1,1)
+    Instance.new("UICorner", velDown)
+    
+    local velUp = Instance.new("TextButton", velRow)
+    velUp.Size = UDim2.new(0.25, 0, 1, 0)
+    velUp.Position = UDim2.new(0.75, 0, 0, 0)
+    velUp.BackgroundColor3 = Color3.fromRGB(40, 60, 40)
+    velUp.Text = "+"
+    velUp.TextColor3 = Color3.new(1,1,1)
+    Instance.new("UICorner", velUp)
+    
+    -- Offset Control
+    local offRow = Instance.new("Frame", calibFrame)
+    offRow.Size = UDim2.new(1, 0, 0, 35)
+    offRow.Position = UDim2.new(0, 0, 0, 40)
+    offRow.BackgroundTransparency = 1
+    
+    local offLabel = Instance.new("TextLabel", offRow)
+    offLabel.Size = UDim2.new(0.4, 0, 1, 0)
+    offLabel.Position = UDim2.new(0.3, 0, 0, 0)
+    offLabel.BackgroundTransparency = 1
+    offLabel.Text = "OffY: " .. projectileLaunchOffset
+    offLabel.TextColor3 = Color3.new(1,1,1)
+    
+    local offDown = Instance.new("TextButton", offRow)
+    offDown.Size = UDim2.new(0.25, 0, 1, 0)
+    offDown.BackgroundColor3 = Color3.fromRGB(60, 40, 40)
+    offDown.Text = "-"
+    offDown.TextColor3 = Color3.new(1,1,1)
+    Instance.new("UICorner", offDown)
+    
+    local offUp = Instance.new("TextButton", offRow)
+    offUp.Size = UDim2.new(0.25, 0, 1, 0)
+    offUp.Position = UDim2.new(0.75, 0, 0, 0)
+    offUp.BackgroundColor3 = Color3.fromRGB(40, 60, 40)
+    offUp.Text = "+"
+    offUp.TextColor3 = Color3.new(1,1,1)
+    Instance.new("UICorner", offUp)
+
+    -- Button Logic
+    local function updateLabels()
+        local currentVel = PROJECTILE_VELOCITIES["Bow"] -- Default to Bow for UI
+        if projectileWeapon then currentVel = PROJECTILE_VELOCITIES[projectileWeapon] end
+        velLabel.Text = "Vel: " .. (currentVel or "???")
+        offLabel.Text = "OffY: " .. string.format("%.1f", projectileLaunchOffset)
+    end
+    
+    velDown.MouseButton1Click:Connect(function()
+        -- Adjust all velocities for simplicity (or just current)
+        for k,v in pairs(PROJECTILE_VELOCITIES) do
+            PROJECTILE_VELOCITIES[k] = v - 10
+        end
+        updateLabels()
+    end)
+    
+    velUp.MouseButton1Click:Connect(function()
+        for k,v in pairs(PROJECTILE_VELOCITIES) do
+            PROJECTILE_VELOCITIES[k] = v + 10
+        end
+        updateLabels()
+    end)
+    
+    offDown.MouseButton1Click:Connect(function()
+        projectileLaunchOffset = projectileLaunchOffset - 0.1
+        updateLabels()
+    end)
+    
+    offUp.MouseButton1Click:Connect(function()
+        projectileLaunchOffset = projectileLaunchOffset + 0.1
+        updateLabels()
+    end)
+    
+    updateLabels()
 end
 
 -- Create Modern Sidebar Panel
