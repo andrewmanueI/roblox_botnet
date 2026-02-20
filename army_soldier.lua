@@ -1219,6 +1219,17 @@ local function handleActionData(data)
                     
                     if targetPlayer then
                         projectileTarget = targetPlayer
+                        
+                        -- Expand target hitbox
+                        pcall(function()
+                            local root = targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+                            if root and root:IsA("BasePart") then
+                                root.Size = Vector3.new(10, 10, 10)
+                                root.Transparency = 0.4
+                                root.CanCollide = false
+                            end
+                        end)
+                        
                         sendNotify("Projectile", "Locked onto " .. targetPlayer.Name .. " - Press FIRE to shoot")
                     end
                 end
@@ -1308,6 +1319,15 @@ local function handleActionData(data)
                         LocalPlayer.CameraMinZoomDistance = 0.5
                         
                         projectileActive = false
+                        
+                        -- Restore target hitbox
+                        pcall(function()
+                            local root = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
+                            if root and root:IsA("BasePart") then
+                                root.Size = Vector3.new(2, 1, 1)
+                                root.Transparency = 0
+                            end
+                        end)
                     end)
                 end
             elseif action == "projectile_cancel" then
@@ -1323,6 +1343,14 @@ local function handleActionData(data)
                     LocalPlayer.CameraMaxZoomDistance = 400
                     LocalPlayer.CameraMinZoomDistance = 0.5
                 end
+                -- Restore target hitbox
+                pcall(function()
+                    local root = projectileTarget and projectileTarget.Character and projectileTarget.Character:FindFirstChild("HumanoidRootPart")
+                    if root and root:IsA("BasePart") then
+                        root.Size = Vector3.new(2, 1, 1)
+                        root.Transparency = 0
+                    end
+                end)
                 projectileActive = false
                 projectileTarget = nil
                 projectileWeapon = nil
