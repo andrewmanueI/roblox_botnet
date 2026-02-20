@@ -43,11 +43,6 @@ local autoJumpForceCount = 0 -- temporary override while slide/walk movement is 
 -- Packet IDs - Populated dynamically at runtime from ByteNet
 local PacketIds = {}
 
--- Helper to detect mobile device
-local function isMobile()
-    local UserInputService = game:GetService("UserInputService")
-    return UserInputService.TouchEnabled and not UserInputService.MouseEnabled
-end
 
 -- Initialize all packet IDs dynamically
 local function initPacketIds()
@@ -330,78 +325,8 @@ task.spawn(function()
     end
 end)
 
--- Projectile Aiming Loop
-task.spawn(function()
-    local rs = RunService.RenderStepped
-    while isRunning do
-        rs:Wait()
-        if projectileActive and projectileTarget and projectileWeapon then
-            -- EXACT copy of aim_assist.lua aiming logic (lines 145-211)
-            -- Track the player's head dynamically
-            if projectileTarget.Character and projectileTarget.Character:FindFirstChild("Head") and projectileTarget.Character:FindFirstChild("HumanoidRootPart") then
-                local targetHead = projectileTarget.Character.Head
-                local targetPos = targetHead.Position
-                local currentPos = workspace.CurrentCamera.CFrame.Position
-                
-                local v = PROJECTILE_VELOCITIES[projectileWeapon] or 580
-                
-                -- Target Prediction
-                -- Calculate Time of Flight (ToF) approx: t = dist / v
-                local dist = (targetPos - currentPos).Magnitude
-                
-                -- Apply Drag Multiplier to ToF
-                local tofMult = TOF_MULTIPLIERS[projectileWeapon] or 1
-                local tof = (dist / v) * tofMult
-                
-                -- Refine ToF with one iteration (since moving target changes distance)
-                local targetVel = projectileTarget.Character.HumanoidRootPart.AssemblyLinearVelocity
-                local futurePosApprox = targetPos + (targetVel * tof)
-                local dist2 = (futurePosApprox - currentPos).Magnitude
-                local tof2 = (dist2 / v) * tofMult
-                
-                local predictedPos = targetPos + (targetVel * tof2)
-                
-                -- Calculate yaw (horizontal look-at)
-                -- Apply dynamic offset relative to camera view looking at PREDICTED position
-                local rawLookCFrame = CFrame.lookAt(currentPos, predictedPos)
-                local offsetAmount = PROJECTILE_OFFSETS[projectileWeapon] or 0
-                
-                local offsetVec = -rawLookCFrame.RightVector * offsetAmount
-                
-                local adjustedTargetPos = predictedPos + offsetVec
-                local lookAtPos = Vector3.new(adjustedTargetPos.X, currentPos.Y, adjustedTargetPos.Z)
-                
-                local baseCFrame = CFrame.lookAt(currentPos, lookAtPos)
-                
-                -- Calculate pitch (vertical angle) using original distance? 
-                -- No, use adjusted distance so the projectile lands at the offset point.
-                
-                -- Launch Offset: Projectile starts lower than camera
-                -- Mobile usually needs less offset due to different camera/character handling? 
-                -- or maybe MORE offset? Let's use calibration variables.
-                -- Default: PC = 1.5, Mobile = 1.5 (User can tune)
-                
-                local yOffset = 1.5
-                if isMobile() then
-                    yOffset = 9 -- Placeholder for future tuning if needed
-                end
-                
-                local launchOrigin = currentPos - Vector3.new(0, yOffset, 0)
-                
-                local v = PROJECTILE_VELOCITIES[projectileWeapon] or 580
-                local theta = solveTrajectory(launchOrigin, adjustedTargetPos, v, PREDICT_GRAVITY)
-                
-                if theta then
-                    -- Apply pitch
-                    workspace.CurrentCamera.CFrame = baseCFrame * CFrame.Angles(theta, 0, 0)
-                else
-                    -- If out of range, just look at them directly (0 pitch relative to base)
-                    workspace.CurrentCamera.CFrame = CFrame.lookAt(currentPos, targetPos)
-                end
-            end
-        end
-    end
-end)
+-- Projectile aiming is now handled inline in the projectile_fire command handler
+-- via a RenderStepped connection using the exact ballistic solver (solveBallistic).
 
 -- Auto-Rejoin logic: Rejoin on error or disconnect
 GuiService.ErrorMessageChanged:Connect(function()
