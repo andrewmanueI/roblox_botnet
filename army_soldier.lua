@@ -99,45 +99,59 @@ end
 -- Call initialization immediately
 initPacketIds()
 
--- Projectile Constants (Ported from aim_assist.lua)
+-- Projectile Constants (confirmed from live projector.step hook)
+local GRAVITY = 122.2
 local PROJECTILE_VELOCITIES = {
-    ["Bow"] = 570,
-    ["Crossbow"] = 640,
-    ["Cannon"] = 1280,
-    ["Ballista"] = 1550
+    ["Bow"]      = 450,
+    ["Crossbow"] = 650,
+    ["Cannon"]   = 1000,
+    ["Ballista"] = 1250
 }
 local PROJECTILE_OFFSETS = {
-    ["Bow"] = 1,
+    ["Bow"]      = 1,
     ["Crossbow"] = 1,
-    ["Cannon"] = 0,
+    ["Cannon"]   = 0,
     ["Ballista"] = 0
 }
 local TOF_MULTIPLIERS = {
-    ["Bow"] = 1.30, -- Based on 3.86s / 2.71s
-    ["Crossbow"] = 1.20, -- Based on 1.95s / 1.49s
-    ["Cannon"] = 1.20, -- Based on 1.00s / 0.735s
-    ["Ballista"] = 1.30 -- Based on 0.82s / 0.61s
+    ["Bow"]      = 1.0,
+    ["Crossbow"] = 1.0,
+    ["Cannon"]   = 1.0,
+    ["Ballista"] = 1.0
 }
-local PREDICT_GRAVITY = 196.2
+local PITCH_TRIM = {
+    ["Bow"]      = -0.005,
+    ["Crossbow"] = -0.005,
+    ["Cannon"]   = 0,
+    ["Ballista"] = 0
+}
 
--- Trajectory solver
-local function solveTrajectory(origin, target, v, g)
-    local vec = target - origin
-    local dx = math.sqrt(vec.X^2 + vec.Z^2)
-    local dy = vec.Y
-    
-    local v2 = v * v
-    -- Quadratic term: v^4 - g(g*x^2 + 2*y*v^2)
-    local term = v2^2 - g * (g * dx^2 + 2 * dy * v2)
-    
-    if term < 0 then
-        return nil -- Out of range
+local MOBILE_AIM_CORRECTION = {
+    ["Bow"]      = true,
+    ["Crossbow"] = true,
+    ["Cannon"]   = false,
+    ["Ballista"] = false
+}
+
+-- Exact ballistic solver (confirmed gravity=122.2, bow velocity=450)
+local function solveBallistic(originPos, targetPos, velocity)
+    local g   = GRAVITY
+    local diff = targetPos - originPos
+    local dx  = Vector3.new(diff.X, 0, diff.Z).Magnitude
+    local dy  = diff.Y
+
+    if dx < 0.01 then
+        return dy > 0 and (math.pi / 2) or -(math.pi / 2)
     end
-    
-    local root = math.sqrt(term)
-    -- Calculate lower angle (direct shot)
-    local angle = math.atan((v2 - root) / (g * dx))
-    
+
+    local v2   = velocity * velocity
+    local disc = v2 * v2 - g * (g * dx * dx + 2 * dy * v2)
+
+    if disc < 0 then
+        return math.pi / 4
+    end
+
+    local angle = math.atan((v2 - math.sqrt(disc)) / (g * dx))
     return angle
 end
 
@@ -216,6 +230,7 @@ local formationActive = false
 local formationLeaderId = nil
 local formationOffsets = nil -- Map of userId -> {x, y, z} relative offsets
 local projectileActive = false
+local projectileTrackingConn = nil
 local projectileWeapon = nil
 local projectileTarget = nil -- Player object to track (like aim_assist.lua)
 local farmToken = 0
@@ -1189,7 +1204,6 @@ local function handleActionData(data)
                 local userIdStr = string.sub(action, 16)
                 local userId = tonumber(userIdStr)
                 if userId then
-                    -- Find the player by UserId
                     local targetPlayer = nil
                     for _, player in ipairs(Players:GetPlayers()) do
                         if player.UserId == userId then
@@ -1202,29 +1216,88 @@ local function handleActionData(data)
                         projectileTarget = targetPlayer
                         projectileActive = true
                         
-                        -- Set first-person zoom when aiming starts (like aim_assist.lua)
+                        -- Set first-person zoom
                         LocalPlayer.CameraMaxZoomDistance = 0.5
                         LocalPlayer.CameraMinZoomDistance = 0.5
                         
-                        -- Press and hold mouse1 using VirtualInputManager (works on mobile!)
+                        -- Press and hold mouse1 (works on mobile)
                         local VIM = game:GetService("VirtualInputManager")
                         VIM:SendMouseButtonEvent(0, 0, 0, true, game, 0)
+                        
+                        -- Disconnect any previous tracking
+                        if projectileTrackingConn then
+                            projectileTrackingConn:Disconnect()
+                            projectileTrackingConn = nil
+                        end
+                        
+                        -- Active camera tracking (ported from aim_assist_mobile.lua)
+                        local cam = workspace.CurrentCamera
+                        projectileTrackingConn = RunService.RenderStepped:Connect(function()
+                            if not projectileActive or not projectileTarget then return end
+                            local tChar = projectileTarget.Character
+                            if not tChar or not tChar:FindFirstChild("Head") or not tChar:FindFirstChild("HumanoidRootPart") then return end
+                            if tChar:FindFirstChild("Humanoid") and tChar.Humanoid.Health <= 0 then return end
+                            
+                            local targetPos = tChar.Head.Position
+                            local currentPos = cam.CFrame.Position
+                            local weapon = projectileWeapon or "Bow"
+                            local v = PROJECTILE_VELOCITIES[weapon] or 450
+                            
+                            -- Target prediction (two-pass ToF refinement)
+                            local dist = (targetPos - currentPos).Magnitude
+                            local tof = dist / v
+                            
+                            local targetVel = tChar.HumanoidRootPart.AssemblyLinearVelocity
+                            local futurePosApprox = targetPos + (targetVel * tof)
+                            local dist2 = (futurePosApprox - currentPos).Magnitude
+                            local tof2 = dist2 / v
+                            
+                            local predictedPos = targetPos + (targetVel * tof2)
+                            
+                            -- Yaw (horizontal look-at)
+                            local rawLookCFrame = CFrame.lookAt(currentPos, predictedPos)
+                            local offsetAmount = PROJECTILE_OFFSETS[weapon] or 0
+                            local offsetVec = -rawLookCFrame.RightVector * offsetAmount
+                            
+                            local adjustedTargetPos = predictedPos + offsetVec
+                            local lookAtPos = Vector3.new(adjustedTargetPos.X, currentPos.Y, adjustedTargetPos.Z)
+                            local baseCFrame = CFrame.lookAt(currentPos, lookAtPos)
+                            
+                            -- Exact ballistic pitch
+                            local theta = solveBallistic(currentPos, predictedPos, v)
+                            if theta then
+                                theta = theta + (PITCH_TRIM[weapon] or 0)
+                                
+                                -- Mobile correction: game fires from Y/2.5 (above center)
+                                if UserInputService.TouchEnabled and MOBILE_AIM_CORRECTION[weapon] then
+                                    local fovY = math.rad(cam.FieldOfView)
+                                    local mobileCorrection = math.atan(math.tan(fovY / 2) * 0.2)
+                                    theta = theta - mobileCorrection
+                                end
+                                
+                                cam.CFrame = baseCFrame * CFrame.Angles(theta, 0, 0)
+                            end
+                        end)
                     end
                 end
 
             elseif action == "projectile_fire" then
                  if projectileActive and projectileTarget then
                     task.spawn(function()
-                        -- Release mouse1 using VirtualInputManager (works on mobile!)
+                        -- Disconnect camera tracking
+                        if projectileTrackingConn then
+                            projectileTrackingConn:Disconnect()
+                            projectileTrackingConn = nil
+                        end
+                        
+                        -- Release mouse1
                         local VIM = game:GetService("VirtualInputManager")
                         VIM:SendMouseButtonEvent(0, 0, 0, false, game, 0)
                         
                         -- Restore zoom
-                        task.wait(0.1) -- Small delay to ensure shot fires
-                        local preMaxZoom = 400 -- Default Roblox value
-                        local preMinZoom = 0.5
-                        LocalPlayer.CameraMaxZoomDistance = preMaxZoom
-                        LocalPlayer.CameraMinZoomDistance = preMinZoom
+                        task.wait(0.1)
+                        LocalPlayer.CameraMaxZoomDistance = 400
+                        LocalPlayer.CameraMinZoomDistance = 0.5
                         
                         projectileActive = false
                         projectileTarget = nil

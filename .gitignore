@@ -14,3 +14,5 @@ army_soldier.lua
 .gitignore
 .agent/skills/roblox_army_protocol/SKILL.md
 aim_assist.lua
+aim_assist_mobile.lua
+aim_test_mobile.lua
