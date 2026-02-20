@@ -1442,11 +1442,16 @@ local function handleActionData(data)
     end
 end
 
+local wsRetryCount = 0
+
 local function connectWebSocket()
     if not isRunning or isConnecting then return end
     isConnecting = true
     
-    print("[ARMY] Connecting to WebSocket: " .. WS_URL)
+    wsRetryCount = wsRetryCount + 1
+    local attempt = wsRetryCount
+    print(string.format("[ARMY] Connecting to WebSocket (attempt %d): %s", attempt, WS_URL))
+    
     local success, ws = pcall(function()
         return WebSocket.connect(WS_URL)
     end)
@@ -1460,28 +1465,31 @@ local function connectWebSocket()
     
     activeWS = ws
     isConnecting = false
+    wsRetryCount = 0
+    print("[ARMY] WebSocket connected successfully")
     
     ws.OnMessage:Connect(function(message)
-        local success, data = pcall(function()
+        local ok, data = pcall(function()
             return HttpService:JSONDecode(message)
         end)
         
-        if success and data then
+        if ok and data then
             if data.type == "registered" then
                 clientId = data.clientId
                 sendNotify("System", "Registered via WS: " .. clientId)
                 print("[ARMY] Registered via WS as " .. clientId)
             elseif data.type == "heartbeat_ack" then
                 -- Registration confirmed by server
-                -- print("[ARMY] Heartbeat ACK")
             elseif data.type == "error" and data.code == "not_registered" then
                 warn("[ARMY] Server says not registered. Re-registering...")
-                activeWS:Send(HttpService:JSONEncode({
-                    type = "register",
-                    name = LocalPlayer.Name,
-                    isCommander = isCommander,
-                    clientId = clientId
-                }))
+                pcall(function()
+                    ws:Send(HttpService:JSONEncode({
+                        type = "register",
+                        name = LocalPlayer.Name,
+                        isCommander = isCommander,
+                        clientId = clientId
+                    }))
+                end)
             elseif data.id then
                 handleActionData(data)
             end
@@ -1489,19 +1497,25 @@ local function connectWebSocket()
     end)
     
     ws.OnClose:Connect(function()
-        print("[ARMY] WebSocket disconnected. Reconnecting in 5s...")
+        warn("[ARMY] WebSocket disconnected.")
         activeWS = nil
-        task.delay(5, connectWebSocket)
+        isConnecting = false
+        if isRunning then
+            print("[ARMY] Will reconnect in 3s...")
+            task.delay(3, connectWebSocket)
+        end
     end)
     
-    -- Register
-    local regData = {
-        type = "register",
-        name = LocalPlayer.Name,
-        isCommander = isCommander,
-        clientId = clientId -- Reuse if we have one
-    }
-    ws:Send(HttpService:JSONEncode(regData))
+    -- Register immediately on connect
+    pcall(function()
+        local regData = {
+            type = "register",
+            name = LocalPlayer.Name,
+            isCommander = isCommander,
+            clientId = clientId
+        }
+        ws:Send(HttpService:JSONEncode(regData))
+    end)
 end
 
 highlightPlayers = function()
@@ -6770,16 +6784,23 @@ LocalPlayer.CharacterAdded:Connect(function()
     setupInfiniteJump()
 end)
 
--- Polling loop removed. WebSocket handling is async via OnMessage.
+-- Main loop: heartbeat + reconnect watchdog
 while isRunning do
-    -- Polling thru websockets: send heartbeat every 5s to verify registration
     task.wait(5)
     
     if activeWS and clientId then
-        pcall(function()
+        local ok = pcall(function()
             activeWS:Send(HttpService:JSONEncode({ type = "heartbeat", clientId = clientId }))
         end)
+        if not ok then
+            -- Send failed; WS is dead but OnClose may not have fired
+            warn("[ARMY] Heartbeat send failed. Forcing reconnect...")
+            activeWS = nil
+            isConnecting = false
+            connectWebSocket()
+        end
     elseif not activeWS and not isConnecting then
+        warn("[ARMY] No active WS detected. Reconnecting...")
         connectWebSocket()
     end
 end
