@@ -1075,10 +1075,15 @@ local function handleActionData(data)
             elseif string.sub(action, 1, 13) == "prepare_tool " then
                 local params = string.sub(action, 14)
                 local parts = string.split(params, " ")
+                -- Format: prepare_tool <name> <pos1> <pos2> [amount]
+                -- amount is optional, defaults to 1
                 if #parts >= 3 then
-                    local itemName = table.concat(parts, " ", 1, #parts - 2)
-                    local pos1Str = parts[#parts - 1]
-                    local pos2Str = parts[#parts]
+                    local hasAmount = #parts >= 4 and tonumber(parts[#parts])
+                    local amount = hasAmount or 1
+                    local endNameIdx = hasAmount and (#parts - 3) or (#parts - 2)
+                    local itemName = table.concat(parts, " ", 1, endNameIdx)
+                    local pos1Str = hasAmount and parts[#parts - 2] or parts[#parts - 1]
+                    local pos2Str = hasAmount and parts[#parts - 1] or parts[#parts]
                     
                     local p1Parts = string.split(pos1Str, ",")
                     local p2Parts = string.split(pos2Str, ",")
@@ -1086,7 +1091,7 @@ local function handleActionData(data)
                     if #p1Parts == 3 and #p2Parts == 3 then
                         local p1 = Vector3.new(tonumber(p1Parts[1]), tonumber(p1Parts[2]), tonumber(p1Parts[3]))
                         local p2 = Vector3.new(tonumber(p2Parts[1]), tonumber(p2Parts[2]), tonumber(p2Parts[3]))
-                        startPrepareTool(itemName, p1, p2)
+                        startPrepareTool(itemName, p1, p2, amount)
                     end
                 end
                 return true
@@ -1214,33 +1219,41 @@ local function handleActionData(data)
                     
                     if targetPlayer then
                         projectileTarget = targetPlayer
+                        sendNotify("Projectile", "Locked onto " .. targetPlayer.Name .. " - Press FIRE to shoot")
+                    end
+                end
+
+            elseif action == "projectile_fire" then
+                if projectileTarget then
+                    task.spawn(function()
+                        local target = projectileTarget
+                        local weapon = projectileWeapon or "Bow"
                         projectileActive = true
                         
-                        -- Set first-person zoom
+                        -- Step 1: Enter first-person zoom
                         LocalPlayer.CameraMaxZoomDistance = 0.5
                         LocalPlayer.CameraMinZoomDistance = 0.5
+                        task.wait(0.2)
                         
-                        -- Press and hold mouse1 (works on mobile)
+                        -- Step 2: Press and hold mouse1 (starts draw/charge)
                         local VIM = game:GetService("VirtualInputManager")
                         VIM:SendMouseButtonEvent(0, 0, 0, true, game, 0)
                         
-                        -- Disconnect any previous tracking
+                        -- Step 3: Start camera tracking while charging
                         if projectileTrackingConn then
                             projectileTrackingConn:Disconnect()
                             projectileTrackingConn = nil
                         end
                         
-                        -- Active camera tracking (ported from aim_assist_mobile.lua)
                         local cam = workspace.CurrentCamera
                         projectileTrackingConn = RunService.RenderStepped:Connect(function()
-                            if not projectileActive or not projectileTarget then return end
-                            local tChar = projectileTarget.Character
-                            if not tChar or not tChar:FindFirstChild("Head") or not tChar:FindFirstChild("HumanoidRootPart") then return end
+                            if not projectileActive or not target or not target.Character then return end
+                            local tChar = target.Character
+                            if not tChar:FindFirstChild("Head") or not tChar:FindFirstChild("HumanoidRootPart") then return end
                             if tChar:FindFirstChild("Humanoid") and tChar.Humanoid.Health <= 0 then return end
                             
                             local targetPos = tChar.Head.Position
                             local currentPos = cam.CFrame.Position
-                            local weapon = projectileWeapon or "Bow"
                             local v = PROJECTILE_VELOCITIES[weapon] or 450
                             
                             -- Target prediction (two-pass ToF refinement)
@@ -1278,31 +1291,41 @@ local function handleActionData(data)
                                 cam.CFrame = baseCFrame * CFrame.Angles(theta, 0, 0)
                             end
                         end)
-                    end
-                end
-
-            elseif action == "projectile_fire" then
-                 if projectileActive and projectileTarget then
-                    task.spawn(function()
-                        -- Disconnect camera tracking
+                        
+                        -- Step 4: Wait 5 seconds for full charge
+                        task.wait(5)
+                        
+                        -- Step 5: Release mouse1 (fires the shot)
                         if projectileTrackingConn then
                             projectileTrackingConn:Disconnect()
                             projectileTrackingConn = nil
                         end
-                        
-                        -- Release mouse1
-                        local VIM = game:GetService("VirtualInputManager")
                         VIM:SendMouseButtonEvent(0, 0, 0, false, game, 0)
                         
-                        -- Restore zoom
+                        -- Step 6: Restore zoom
                         task.wait(0.1)
                         LocalPlayer.CameraMaxZoomDistance = 400
                         LocalPlayer.CameraMinZoomDistance = 0.5
                         
                         projectileActive = false
-                        projectileTarget = nil
                     end)
                 end
+            elseif action == "projectile_cancel" then
+                -- Cancel any active projectile tracking/charging
+                if projectileTrackingConn then
+                    projectileTrackingConn:Disconnect()
+                    projectileTrackingConn = nil
+                end
+                if projectileActive then
+                    local VIM = game:GetService("VirtualInputManager")
+                    VIM:SendMouseButtonEvent(0, 0, 0, false, game, 0)
+                    task.wait(0.1)
+                    LocalPlayer.CameraMaxZoomDistance = 400
+                    LocalPlayer.CameraMinZoomDistance = 0.5
+                end
+                projectileActive = false
+                projectileTarget = nil
+                projectileWeapon = nil
             elseif string.sub(action, 1, 6) == "equip " then
                 local slot = tonumber(string.sub(action, 7))
                 if slot then fireEquip(slot) end
@@ -1645,16 +1668,18 @@ stopPrepare = function()
     stopGotoWalk()
 end
 
-startPrepareTool = function(itemName, pos1, pos2)
+startPrepareTool = function(itemName, pos1, pos2, amount)
     stopPrepare()
+    amount = amount or 1
     local myToken = prepareToken
     isPreparing = true
+    local collected = 0
     
     task.spawn(function()
-        sendNotify("Prepare", "Starting prep for: " .. itemName)
+        sendNotify("Prepare", string.format("Starting prep for: %s (x%d)", itemName, amount))
 
         local targetLower = (itemName or ""):lower()
-        local STOP_PREP_WHEN_FOUND = true -- user request: stop once the tool is found
+        local STOP_PREP_WHEN_FOUND = true
 
         -- Active scan state
         local lastSlotStep = 0
@@ -1721,9 +1746,9 @@ startPrepareTool = function(itemName, pos1, pos2)
             local targetPos = hasIt and pos1 or pos2
             local now = os.clock()
 
-            -- Always actively scan slots 1-6 (round-robin), so we don't miss tools
-            -- that only appear when a slot is equipped.
-            if (now - lastSlotStep) >= SLOT_STEP_INTERVAL then
+            -- Only scan toolbar slots for single-item preps (actual tools).
+            -- Multi-amount items are resources that live in the inventory list.
+            if amount <= 1 and (now - lastSlotStep) >= SLOT_STEP_INTERVAL then
                 lastSlotStep = now
                 local foundInSlots = stepSlotScan(targetLower)
                 if foundInSlots then
@@ -1774,8 +1799,14 @@ startPrepareTool = function(itemName, pos1, pos2)
             -- If we have the tool and we managed to reach the "have tool" position,
             -- stop the preparing loop entirely.
             if STOP_PREP_WHEN_FOUND and hasIt and reached and targetPos == pos1 then
-                stopPrepare()
-                break
+                collected = collected + 1
+                if collected >= amount then
+                    sendNotify("Prepare", string.format("Done! Collected %d/%d %s", collected, amount, itemName))
+                    stopPrepare()
+                    break
+                else
+                    sendNotify("Prepare", string.format("Collected %d/%d %s - continuing", collected, amount, itemName))
+                end
             end
             task.wait(0.25)
         end
@@ -3486,8 +3517,8 @@ local function showPrepareDialog()
     dialog.Name = "ArmyPrepareDialog"
     
     local frame = Instance.new("Frame", dialog)
-    frame.Size = UDim2.new(0, 300, 0, 150)
-    frame.Position = UDim2.new(0.5, -150, 0.5, -75)
+    frame.Size = UDim2.new(0, 300, 0, 200)
+    frame.Position = UDim2.new(0.5, -150, 0.5, -100)
     frame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
     frame.BorderSizePixel = 0
     Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 10)
@@ -3502,8 +3533,8 @@ local function showPrepareDialog()
     title.BackgroundTransparency = 1
     
     local input = Instance.new("TextBox", frame)
-    input.Size = UDim2.new(0.8, 0, 0, 35)
-    input.Position = UDim2.new(0.1, 0, 0.35, 0)
+    input.Size = UDim2.new(0.55, 0, 0, 35)
+    input.Position = UDim2.new(0.05, 0, 0.25, 0)
     input.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
     input.Text = ""
     input.PlaceholderText = "Tool Name (e.g. Wood Hoe)"
@@ -3512,9 +3543,29 @@ local function showPrepareDialog()
     input.Font = Enum.Font.Gotham
     Instance.new("UICorner", input).CornerRadius = UDim.new(0, 6)
     
+    local amountLabel = Instance.new("TextLabel", frame)
+    amountLabel.Size = UDim2.new(0, 30, 0, 35)
+    amountLabel.Position = UDim2.new(0.62, 0, 0.25, 0)
+    amountLabel.Text = "x"
+    amountLabel.TextColor3 = Color3.fromRGB(180, 180, 190)
+    amountLabel.TextSize = 14
+    amountLabel.Font = Enum.Font.GothamBold
+    amountLabel.BackgroundTransparency = 1
+    
+    local amountInput = Instance.new("TextBox", frame)
+    amountInput.Size = UDim2.new(0.2, 0, 0, 35)
+    amountInput.Position = UDim2.new(0.73, 0, 0.25, 0)
+    amountInput.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+    amountInput.Text = "1"
+    amountInput.PlaceholderText = "1"
+    amountInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+    amountInput.TextSize = 14
+    amountInput.Font = Enum.Font.Gotham
+    Instance.new("UICorner", amountInput).CornerRadius = UDim.new(0, 6)
+    
     local confirm = Instance.new("TextButton", frame)
     confirm.Size = UDim2.new(0.35, 0, 0, 30)
-    confirm.Position = UDim2.new(0.1, 0, 0.7, 0)
+    confirm.Position = UDim2.new(0.1, 0, 0.78, 0)
     confirm.BackgroundColor3 = Color3.fromRGB(150, 120, 255)
     confirm.Text = "OK"
     confirm.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -3523,7 +3574,7 @@ local function showPrepareDialog()
     
     local cancel = Instance.new("TextButton", frame)
     cancel.Size = UDim2.new(0.35, 0, 0, 30)
-    cancel.Position = UDim2.new(0.55, 0, 0.7, 0)
+    cancel.Position = UDim2.new(0.55, 0, 0.78, 0)
     cancel.BackgroundColor3 = Color3.fromRGB(100, 100, 110)
     cancel.Text = "Cancel"
     cancel.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -3548,10 +3599,11 @@ local function showPrepareDialog()
                             local p2 = Mouse.Hit.Position
                             cancelPendingClick()
                             
-                            local cmd = string.format("prepare_tool %s %.1f,%.1f,%.1f %.1f,%.1f,%.1f",
-                                itemName, p1.X, p1.Y, p1.Z, p2.X, p2.Y, p2.Z)
+                            local amt = tonumber(amountInput.Text) or 1
+                            local cmd = string.format("prepare_tool %s %.1f,%.1f,%.1f %.1f,%.1f,%.1f %d",
+                                itemName, p1.X, p1.Y, p1.Z, p2.X, p2.Y, p2.Z, amt)
                             sendCommand(cmd)
-                            sendNotify("Prepare", "Enforcing: " .. itemName)
+                            sendNotify("Prepare", string.format("Enforcing: %s x%d", itemName, amt))
                             showPrepareFinishGUI()
                         end
                     end), nil)
@@ -4775,9 +4827,10 @@ local function showFireButton()
     screenGui.Name = "ArmyFireButton"
     screenGui.ResetOnSpawn = false
     
+    -- FIRE button (left)
     local btn = Instance.new("TextButton", screenGui)
     btn.Size = UDim2.new(0, 120, 0, 60)
-    btn.Position = UDim2.new(0.5, -60, 0.85, 0)
+    btn.Position = UDim2.new(0.5, -130, 0.85, 0)
     btn.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
     btn.Text = "FIRE"
     btn.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -4791,6 +4844,25 @@ local function showFireButton()
     btn.MouseButton1Click:Connect(function()
         sendCommand("projectile_fire")
         sendNotify("Projectile", "FIRING!")
+        screenGui:Destroy()
+    end)
+    
+    -- Cancel button (right)
+    local cancelBtn = Instance.new("TextButton", screenGui)
+    cancelBtn.Size = UDim2.new(0, 120, 0, 60)
+    cancelBtn.Position = UDim2.new(0.5, 10, 0.85, 0)
+    cancelBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 90)
+    cancelBtn.Text = "Cancel"
+    cancelBtn.TextColor3 = Color3.fromRGB(220, 220, 220)
+    cancelBtn.Font = Enum.Font.GothamBold
+    cancelBtn.TextSize = 20
+    
+    Instance.new("UICorner", cancelBtn).CornerRadius = UDim.new(0, 8)
+    Instance.new("UIStroke", cancelBtn).Color = Color3.fromRGB(120, 120, 130)
+    
+    cancelBtn.MouseButton1Click:Connect(function()
+        sendCommand("projectile_cancel")
+        sendNotify("Projectile", "Cancelled")
         screenGui:Destroy()
     end)
 end
