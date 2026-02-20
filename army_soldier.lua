@@ -4844,7 +4844,6 @@ local function showFireButton()
     btn.MouseButton1Click:Connect(function()
         sendCommand("projectile_fire")
         sendNotify("Projectile", "FIRING!")
-        screenGui:Destroy()
     end)
     
     -- Cancel button (right)
