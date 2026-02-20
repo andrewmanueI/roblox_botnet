@@ -132,6 +132,12 @@ local MOBILE_AIM_CORRECTION = {
     ["Cannon"]   = false,
     ["Ballista"] = false
 }
+local CHARGE_TIMES = {
+    ["Bow"]      = 0.75,
+    ["Crossbow"] = 0.9,
+    ["Cannon"]   = 3.5,
+    ["Ballista"] = 0.45
+}
 
 -- Exact ballistic solver (confirmed gravity=122.2, bow velocity=450)
 local function solveBallistic(originPos, targetPos, velocity)
@@ -1303,8 +1309,9 @@ local function handleActionData(data)
                             end
                         end)
                         
-                        -- Step 4: Wait 5 seconds for full charge
-                        task.wait(5)
+                        -- Step 4: Wait for weapon charge
+                        local chargeTime = CHARGE_TIMES[weapon] or 0.75
+                        task.wait(chargeTime)
                         
                         -- Step 5: Release mouse1 (fires the shot)
                         if projectileTrackingConn then
